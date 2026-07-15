@@ -54,7 +54,7 @@ DEFAULT_STATE = {
 }
 
 
-HOME = Path(os.environ.get("PLAYER_HOME", Path.cwd())).resolve()
+HOME = Path(os.environ.get("PLAYER_HOME", Path.cwd() / ".sym-data")).resolve()
 LIBRARY_DIR = Path(os.environ.get("PLAYER_LIBRARY", HOME / "library")).resolve()
 PLAYLIST_DIR = Path(os.environ.get("PLAYER_PLAYLISTS", HOME / "playlists")).resolve()
 ASSETS_DIR = Path(os.environ.get("PLAYER_ASSETS", HOME / "assets")).resolve()
@@ -1812,6 +1812,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(status_payload())
             elif parsed.path == "/_sym/health":
                 self.send_json({"ok": True, "status": "healthy", "version": __version__})
+            elif parsed.path == "/mini-sym":
+                self.send_html(mini_sym_page())
             elif parsed.path == "/api/reset":
                 self.send_json(reset_player_state())
             elif parsed.path == "/api/display/reinit":
@@ -2449,10 +2451,84 @@ setInterval(() => {
 </html>"""
 
 
+MINI_TEMPLATE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Player</title>
+<style>
+:root{color-scheme:dark;}
+*{box-sizing:border-box;margin:0;}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#050507;color:#ece9f5;
+  padding:11px 13px;min-height:100vh;display:flex;flex-direction:column;gap:5px;justify-content:center;}
+.badge{font-size:10px;letter-spacing:.11em;text-transform:uppercase;color:#a855f7;font-weight:700;
+  display:flex;align-items:center;gap:6px;}
+.dot{width:7px;height:7px;border-radius:50%;background:#5fd49a;flex:0 0 auto;}
+.dot.idle{background:#6b6580;}
+.dot.paused{background:#e0a36b;}
+.title{font-size:15px;font-weight:700;line-height:1.15;overflow:hidden;text-overflow:ellipsis;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.artist{font-size:11px;color:#9a93b3;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+</style></head>
+<body>
+<div class="badge"><span class="dot __DOT__" id="dot"></span><span id="status">Player · __STATUS__</span></div>
+<div class="title" id="title">__TITLE__</div>
+<div class="artist" id="artist">__ARTIST__</div>
+<script>
+async function tick(){
+  try{
+    const r=await fetch('/api/status',{cache:'no-store'});
+    const d=await r.json();
+    const tr=d.current_track, st=d.state||{};
+    const dot=document.getElementById('dot'), status=document.getElementById('status');
+    if(tr){
+      const paused=!!st.paused;
+      document.getElementById('title').textContent=tr.title||'Unknown';
+      document.getElementById('artist').textContent=tr.artist||'';
+      status.textContent='Player · '+(paused?'Paused':'Now Playing');
+      dot.className='dot'+(paused?' paused':'');
+    }else{
+      document.getElementById('title').textContent='Nothing playing';
+      document.getElementById('artist').textContent=(d.library_count||0)+' tracks in library';
+      status.textContent='Player · Idle';
+      dot.className='dot idle';
+    }
+  }catch(e){}
+}
+setInterval(tick,5000);
+</script>
+</body></html>"""
+
+
+def mini_sym_page() -> str:
+    payload = status_payload()
+    track = payload.get("current_track")
+    track = track if isinstance(track, dict) else None
+    state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+    count = int(payload.get("library_count", 0) or 0)
+    if track:
+        paused = bool(state.get("paused"))
+        status = "Paused" if paused else "Now Playing"
+        dot = "paused" if paused else ""
+        title = str(track.get("title") or "Unknown")
+        artist = str(track.get("artist") or "")
+    else:
+        status = "Idle"
+        dot = "idle"
+        title = "Nothing playing"
+        artist = f"{count} tracks in library"
+    return (
+        MINI_TEMPLATE
+        .replace("__DOT__", html.escape(dot))
+        .replace("__STATUS__", html.escape(status))
+        .replace("__TITLE__", html.escape(title))
+        .replace("__ARTIST__", html.escape(artist))
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Player MP3 module server")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8010)
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8010")))
     args = parser.parse_args()
 
     ensure_dirs()

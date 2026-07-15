@@ -7,7 +7,7 @@
   "runtime": {
     "type": "python",
     "health_path": "/_sym/health",
-    "startup_timeout_seconds": 30,
+    "startup_timeout_seconds": 60,
     "shutdown_timeout_seconds": 10
   },
   "configuration": {
@@ -22,7 +22,7 @@
     }
   ],
   "data": {
-    "persistent_paths": [".player"]
+    "persistent_paths": [".sym-data"]
   },
   "marketplace": {
     "subtitle": "Local music, streamed to any browser on your network",
