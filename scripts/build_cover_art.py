@@ -8,12 +8,12 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-os.environ.setdefault("PLAYER_HOME", str(PROJECT_ROOT))
+os.environ.setdefault("JUKEBOX_HOME", str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # noqa: E402
 
-from player import server  # noqa: E402
+from jukebox import server  # noqa: E402
 
 
 def relative_from_playlist(path: Path) -> str:
@@ -81,7 +81,7 @@ def assign_to_playlist(playlist_slug: str, source_path: Path, lcd_path: Path) ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build pixel cover art for Player playlists and albums")
+    parser = argparse.ArgumentParser(description="Build pixel cover art for Jukebox playlists and albums")
     parser.add_argument("source", type=Path)
     parser.add_argument("--stem", default="")
     parser.add_argument("--playlist", default="")

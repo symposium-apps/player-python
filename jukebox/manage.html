@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Player Manager</title>
+  <title>Jukebox Manager</title>
   <style>
     :root {
       color-scheme: dark;
@@ -406,7 +406,7 @@
       }
     }
 
-    /* Player library skin */
+    /* Jukebox library skin */
     :root {
       --bg: #050607;
       --panel: #0b0d0f;
@@ -1998,7 +1998,7 @@
       <span class="brand-mark">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
       </span>
-      <span>Player</span>
+      <span>Jukebox</span>
     </button>
     <nav class="top-nav" aria-label="Library">
       <button class="top-nav-pill" data-nav="root" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/><path d="M9.5 20v-6h5v6"/></svg>Home</button>
@@ -2029,7 +2029,7 @@
       <div class="hero">
         <div>
           <nav class="crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
-          <h1 id="folderTitle">Player</h1>
+          <h1 id="folderTitle">Jukebox</h1>
           <p id="folderHint">Choose a folder.</p>
         </div>
         <img class="folder-cover" id="folderCover" alt="" hidden>
@@ -2060,7 +2060,7 @@
   <footer class="playerbar">
     <div class="player-track">
       <img id="playerCover" class="player-cover" alt="" hidden>
-      <div id="playerFallback" class="player-fallback">P</div>
+      <div id="playerFallback" class="player-fallback">J</div>
       <div class="player-copy">
         <strong id="playerTitle">Nothing Playing</strong>
         <span id="playerMeta">Select a track, album, or playlist</span>
@@ -2109,8 +2109,60 @@ const state = {
   view: { type: "root" },
   webAudioTrackId: "",
   playRequestId: 0,
-  scrubbing: false
+  scrubbing: false,
+  playback: loadBrowserPlayback(),
+  lastPlaybackSave: 0
 };
+
+const PLAYBACK_STORAGE_KEY = "jukebox.playback.v1";
+
+function defaultBrowserPlayback() {
+  return { currentTrackId: "", queue: [], queueName: "Queue", paused: true, volume: 70, position: 0 };
+}
+
+function loadBrowserPlayback() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("jukebox.playback.v1") || "null");
+    if (!raw || typeof raw !== "object") return defaultBrowserPlayback();
+    return {
+      currentTrackId: String(raw.currentTrackId || ""),
+      queue: Array.isArray(raw.queue) ? raw.queue.map(String) : [],
+      queueName: String(raw.queueName || "Queue"),
+      paused: raw.paused !== false,
+      volume: Math.max(0, Math.min(100, Number(raw.volume ?? 70))),
+      position: Math.max(0, Number(raw.position || 0))
+    };
+  } catch (_) {
+    return defaultBrowserPlayback();
+  }
+}
+
+function saveBrowserPlayback(force = false) {
+  const now = Date.now();
+  if (!force && now - state.lastPlaybackSave < 1000) return;
+  state.lastPlaybackSave = now;
+  localStorage.setItem(PLAYBACK_STORAGE_KEY, JSON.stringify(state.playback));
+}
+
+function syncStatusFromBrowser() {
+  const current = trackMap().get(String(state.playback.currentTrackId || "")) || null;
+  if (!current) {
+    state.playback.currentTrackId = "";
+    state.playback.position = 0;
+  }
+  state.status = {
+    ...(state.status || {}),
+    current_track: current,
+    state: {
+      ...((state.status && state.status.state) || {}),
+      current_track_id: current ? String(current.id) : null,
+      queue: state.playback.queue,
+      queue_name: state.playback.queueName,
+      paused: state.playback.paused,
+      volume: state.playback.volume
+    }
+  };
+}
 
 function qs(id) {
   return document.getElementById(id);
@@ -2398,7 +2450,7 @@ function visibleTracks() {
 }
 
 function currentQueueIds() {
-  return (state.status?.state?.queue || []).map(item => String(item));
+  return state.playback.queue.map(item => String(item));
 }
 
 function queuedTrackId(direction) {
@@ -2422,7 +2474,7 @@ function updateScrubber() {
 }
 
 function isBrowserPlaybackMode() {
-  return !(state.status && state.status.player && state.status.player.available);
+  return true;
 }
 
 function isCurrentWebAudioReady() {
@@ -2431,10 +2483,28 @@ function isCurrentWebAudioReady() {
 }
 
 function isPlaybackPaused() {
-  if (isBrowserPlaybackMode() && state.status && state.status.current_track) {
-    return qs("webAudio").paused || !isCurrentWebAudioReady();
+  if (!(state.status && state.status.current_track)) return true;
+  return qs("webAudio").paused || !isCurrentWebAudioReady();
+}
+
+function prepareStoredAudio() {
+  const audio = qs("webAudio");
+  const current = state.status && state.status.current_track;
+  audio.volume = Math.max(0, Math.min(1, Number(state.playback.volume || 70) / 100));
+  if (!current) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    state.webAudioTrackId = "";
+    return;
   }
-  return !!(state.status && state.status.state.paused);
+  const id = String(current.id);
+  if (state.webAudioTrackId !== id) {
+    audio.pause();
+    audio.src = mediaUrl(id);
+    audio.load();
+    state.webAudioTrackId = id;
+  }
 }
 
 async function playWebAudio(trackId) {
@@ -2449,6 +2519,8 @@ async function playWebAudio(trackId) {
   audio.volume = Math.max(0, Math.min(1, Number(qs("volumeSlider").value || 70) / 100));
   try {
     await audio.play();
+    state.playback.paused = false;
+    saveBrowserPlayback(true);
   } catch (error) {
     msg("Browser blocked audio. Click Resume once.");
     throw error;
@@ -2457,6 +2529,8 @@ async function playWebAudio(trackId) {
 
 function pauseWebAudio() {
   qs("webAudio").pause();
+  state.playback.paused = true;
+  saveBrowserPlayback(true);
 }
 
 function actionQueue(action) {
@@ -2490,11 +2564,11 @@ function viewTitle() {
   if (state.view.type === "playlist") return playlistBySlug(state.view.slug)?.name || "Playlist";
   if (state.view.type === "albums") return "Albums";
   if (state.view.type === "album") return state.view.name || "Album";
-  return "Player";
+  return "Jukebox";
 }
 
 function crumbs() {
-  const list = [{ label: "Player", view: { type: "root" } }];
+  const list = [{ label: "Jukebox", view: { type: "root" } }];
   if (state.view.type === "playlists" || state.view.type === "playlist") {
     list.push({ label: "Playlists", view: { type: "playlists" } });
   }
@@ -2558,7 +2632,7 @@ function renderStatus() {
   qs("nowLine").textContent = current ? `${paused ? "Paused" : "Playing"}: ${current.name}` : "Nothing loaded";
   qs("playerTitle").textContent = current ? current.name : "Nothing Playing";
   qs("playerMeta").textContent = current
-    ? [current.artist, current.album].filter(Boolean).join(" / ") || current.relative_path || "Playing from Player"
+    ? [current.artist, current.album].filter(Boolean).join(" / ") || current.relative_path || "Playing from Jukebox"
     : "Select a track, album, or playlist";
   const currentCover = current ? albumCoverForTrack(current) : "";
   qs("playerCover").hidden = !currentCover;
@@ -2569,9 +2643,9 @@ function renderStatus() {
   qs("volumeValue").textContent = state.status.state.volume;
   qs("webAudio").volume = Math.max(0, Math.min(1, Number(state.status.state.volume || 70) / 100));
   qs("storageText").textContent = storage.total
-    ? `SD ${fmtSize(storage.used)} used / ${fmtSize(storage.total)} total | ${fmtSize(storage.free)} free | Player ${fmtSize(storage.player)}`
+    ? `VPS ${fmtSize(storage.used)} used / ${fmtSize(storage.total)} total | ${fmtSize(storage.free)} free | Jukebox ${fmtSize(storage.jukebox)}`
     : "Storage unknown";
-  qs("backendText").textContent = `${usedPercent}% full | ${state.tracks.length} files | ${state.playlists.length} playlists | ${state.status.player.available ? "mpv ready" : "mpv missing"}`;
+  qs("backendText").textContent = `${usedPercent}% full | ${state.tracks.length} files | ${state.playlists.length} playlists | browser audio`;
 }
 
 function sectionBlock(title, meta, body) {
@@ -2808,6 +2882,9 @@ async function refresh({ keepMessage = false } = {}) {
   state.status = status;
   state.tracks = library.tracks || [];
   state.playlists = playlists.playlists || [];
+  state.playback.queue = state.playback.queue.filter(id => state.tracks.some(track => String(track.id) === String(id)));
+  syncStatusFromBrowser();
+  prepareStoredAudio();
   if (state.view.type === "playlist" && !playlistBySlug(state.view.slug)) state.view = { type: "playlists" };
   if (state.view.type === "album" && !albums().find(item => item.name === state.view.name)) state.view = { type: "albums" };
   render();
@@ -2857,16 +2934,15 @@ async function playTrack(trackId, queue, queueName) {
   const requestId = ++state.playRequestId;
   const audio = qs("webAudio");
   audio.pause();
+  state.playback.currentTrackId = String(trackId);
+  state.playback.queue = (queue || []).map(String);
+  state.playback.queueName = String(queueName || "Queue");
+  state.playback.paused = false;
+  state.playback.position = 0;
+  saveBrowserPlayback(true);
+  syncStatusFromBrowser();
   let webAudioError = null;
-  const webPlayback = playWebAudio(trackId).catch(error => {
-    webAudioError = error;
-  });
-  state.status = await api("/api/play", {
-    method: "POST",
-    body: JSON.stringify({ track_id: trackId, queue, queue_name: queueName, output: false })
-  });
-  if (requestId !== state.playRequestId) return;
-  await webPlayback;
+  await playWebAudio(trackId).catch(error => { webAudioError = error; });
   if (requestId !== state.playRequestId) return;
   render();
   updateScrubber();
@@ -2914,7 +2990,7 @@ async function createPlaylistFromModal() {
 
 qs("backBtn").addEventListener("click", goBack);
 qs("refreshBtn").addEventListener("click", () => refresh());
-qs("lcdBtn").addEventListener("click", () => { window.location.href = "/"; });
+qs("lcdBtn").addEventListener("click", () => { window.location.href = "/mini-sym"; });
 document.querySelectorAll("[data-nav]").forEach(button => {
   button.addEventListener("click", () => {
     const nav = button.dataset.nav;
@@ -2986,7 +3062,7 @@ qs("deleteSelectedBtn").addEventListener("click", async () => {
   if (state.view.type === "playlists") {
     const slugs = selectedPlaylistSlugs();
     if (!slugs.length) return;
-    if (!confirm(`Delete ${slugs.length} playlist${slugs.length === 1 ? "" : "s"}? Audio files stay on the Pi.`)) return;
+    if (!confirm(`Delete ${slugs.length} playlist${slugs.length === 1 ? "" : "s"}? Audio files stay in Jukebox.`)) return;
     await api("/api/playlists/delete", {
       method: "POST",
       body: JSON.stringify({ slugs })
@@ -3000,7 +3076,7 @@ qs("deleteSelectedBtn").addEventListener("click", async () => {
     const albumNames = selectedAlbumNames();
     const trackIds = selectedAlbumTrackIds();
     if (!albumNames.length) return;
-    if (!confirm(`Delete ${albumNames.length} album${albumNames.length === 1 ? "" : "s"}? This deletes the album audio/art files from the Pi and removes those songs from playlists.`)) return;
+    if (!confirm(`Delete ${albumNames.length} album${albumNames.length === 1 ? "" : "s"}? This deletes the album audio/art files from Jukebox and removes those songs from playlists.`)) return;
     await api("/api/albums/delete", {
       method: "POST",
       body: JSON.stringify({ albums: albumNames, track_ids: trackIds })
@@ -3012,7 +3088,7 @@ qs("deleteSelectedBtn").addEventListener("click", async () => {
 
   const ids = selectedTrackIds();
   if (!ids.length) return;
-  if (!confirm(`Delete ${ids.length} audio file${ids.length === 1 ? "" : "s"} from the Pi?`)) return;
+  if (!confirm(`Delete ${ids.length} audio file${ids.length === 1 ? "" : "s"} from Jukebox?`)) return;
   await api("/api/delete", {
     method: "POST",
     body: JSON.stringify({ track_ids: ids })
@@ -3032,7 +3108,9 @@ async function togglePlayback() {
   } else if (state.status?.current_track) {
     await playWebAudio(state.status.current_track.id);
   }
-  state.status = await api("/api/pause", { method: "POST", body: JSON.stringify({ paused, output: false }) });
+  state.playback.paused = paused;
+  saveBrowserPlayback(true);
+  syncStatusFromBrowser();
   render();
   updateScrubber();
 }
@@ -3050,13 +3128,16 @@ qs("prevBtn").addEventListener("click", () => stepPlayback(-1).catch(error => ms
 qs("nextBtn").addEventListener("click", () => stepPlayback(1).catch(error => msg(error.message)));
 
 qs("volumeSlider").addEventListener("change", async event => {
-  state.status = await api("/api/volume", { method: "POST", body: JSON.stringify({ volume: Number(event.target.value), output: false }) });
+  state.playback.volume = Number(event.target.value);
+  saveBrowserPlayback(true);
+  syncStatusFromBrowser();
   renderStatus();
 });
 
 qs("volumeSlider").addEventListener("input", event => {
   qs("volumeValue").textContent = event.target.value;
   qs("webAudio").volume = Math.max(0, Math.min(1, Number(event.target.value) / 100));
+  state.playback.volume = Number(event.target.value);
 });
 
 qs("scrubSlider").addEventListener("input", event => {
@@ -3070,6 +3151,8 @@ qs("scrubSlider").addEventListener("change", event => {
   const audio = qs("webAudio");
   const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
   if (duration) audio.currentTime = duration * (Number(event.target.value) / 1000);
+  state.playback.position = audio.currentTime;
+  saveBrowserPlayback(true);
   state.scrubbing = false;
   updateScrubber();
 });
@@ -3082,8 +3165,22 @@ qs("webAudio").addEventListener("error", () => {
   msg("Browser audio could not load that track");
 });
 
-["loadedmetadata", "durationchange", "timeupdate", "play", "pause", "seeking", "seeked"].forEach(eventName => {
-  qs("webAudio").addEventListener(eventName, updateScrubber);
+qs("webAudio").addEventListener("loadedmetadata", () => {
+  const audio = qs("webAudio");
+  if (state.playback.position > 0 && Number.isFinite(audio.duration)) {
+    audio.currentTime = Math.min(state.playback.position, Math.max(0, audio.duration - 0.25));
+  }
+  updateScrubber();
+});
+
+["durationchange", "timeupdate", "play", "pause", "seeking", "seeked"].forEach(eventName => {
+  qs("webAudio").addEventListener(eventName, () => {
+    updateScrubber();
+    if (eventName === "timeupdate") {
+      state.playback.position = Number(qs("webAudio").currentTime || 0);
+      saveBrowserPlayback();
+    }
+  });
 });
 
 qs("selectAll").addEventListener("change", event => {

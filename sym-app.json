@@ -1,9 +1,9 @@
 {
   "$schema": "https://sympo.si/schemas/sym-app-v1.json",
   "schema_version": 1,
-  "id": "player-python",
-  "name": "Player",
-  "description": "Music player with an app-scoped library, playlists, browser controls, and optional hardware output.",
+  "id": "jukebox",
+  "name": "Jukebox",
+  "description": "A shared VPS-hosted music library with private playback state in every browser.",
   "runtime": {
     "type": "python",
     "health_path": "/_sym/health",
@@ -15,17 +15,12 @@
     "secrets": []
   },
   "integrations": [],
-  "permissions": [
-    {
-      "id": "network.local",
-      "reason": "Serve the control panel and stream local audio to browsers on the local network."
-    }
-  ],
+  "permissions": [],
   "data": {
     "persistent_paths": [".sym-data"]
   },
   "marketplace": {
-    "subtitle": "Local music, streamed to any browser on your network",
+    "subtitle": "Your music library, streamed privately in each browser",
     "category": "content",
     "icon": "assets/icon.svg",
     "accent_color": "#7c3aed"

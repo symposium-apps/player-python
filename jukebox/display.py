@@ -360,7 +360,7 @@ def local_ip() -> str:
 
 
 @dataclass
-class OledPlayerDisplay:
+class OledJukeboxDisplay:
     enabled: bool = True
     bus_id: int = DEFAULT_I2C_BUS
     address: int = DEFAULT_I2C_ADDRESS
@@ -414,12 +414,12 @@ class OledPlayerDisplay:
 
         state = payload.get("state", {})
         current = payload.get("current_track")
-        player = payload.get("player", {})
+        jukebox = payload.get("jukebox", {})
 
         if not isinstance(state, dict):
             state = {}
-        if not isinstance(player, dict):
-            player = {}
+        if not isinstance(jukebox, dict):
+            jukebox = {}
 
         title = "NO TRACK"
         filename = ""
@@ -431,14 +431,14 @@ class OledPlayerDisplay:
         paused = bool(state.get("paused", False))
         queue_name = str(state.get("queue_name") or "All Tracks")
         track_count = int(payload.get("library_count", 0) or 0)
-        audio_ok = bool(player.get("available", False))
+        audio_ok = bool(jukebox.get("available", False))
 
         image = Image.new("1", (WIDTH, HEIGHT), 0)
         draw = ImageDraw.Draw(image)
         font = ImageFont.load_default()
 
         draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), outline=1, fill=0)
-        draw.text((3, 2), "PLAYER", font=font, fill=1)
+        draw.text((3, 2), "JUKEBOX", font=font, fill=1)
         draw.text((79, 2), "PAUSE" if paused else "PLAY", font=font, fill=1)
         draw.line((0, 12, WIDTH - 1, 12), fill=1)
 
@@ -494,7 +494,7 @@ class OledPlayerDisplay:
         draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), outline=1, fill=0)
 
         if path == ["Home"]:
-            logo = "PLAYER" if frame % 4 else "PL>YER"
+            logo = "JUKEBOX" if frame % 4 else "PL>YER"
             mode = "PAUSE" if paused else "PLAY"
             draw.text((3, 2), logo, font=font, fill=1)
             draw.text((91, 2), mode, font=font, fill=1)
@@ -613,7 +613,7 @@ class OledPlayerDisplay:
         draw = ImageDraw.Draw(image)
         font = ImageFont.load_default()
         draw.rectangle((0, 0, WIDTH - 1, HEIGHT - 1), outline=1, fill=0)
-        draw.text((3, 4), "PLAYER", font=font, fill=1)
+        draw.text((3, 4), "JUKEBOX", font=font, fill=1)
         draw.text((3, 20), "starting suit", font=font, fill=1)
         draw.text((3, 35), f"ip {local_ip()}", font=font, fill=1)
         draw.text((3, 50), "port 8010", font=font, fill=1)
@@ -622,7 +622,7 @@ class OledPlayerDisplay:
 
 
 @dataclass
-class TftPlayerDisplay:
+class TftJukeboxDisplay:
     enabled: bool = True
     bus: int = 0
     device: int = 0
@@ -638,7 +638,7 @@ class TftPlayerDisplay:
         self.frames = 0
         self.reinit_count = 0
         self.last_reinit_at = 0.0
-        self.reinit_interval = env_int("PLAYER_TFT_REINIT_SECONDS", 0)
+        self.reinit_interval = env_int("JUKEBOX_TFT_REINIT_SECONDS", 0)
         self.cover_cache: dict[str, Any] = {}
 
     def ensure(self) -> bool:
@@ -703,12 +703,12 @@ class TftPlayerDisplay:
             return False
 
     def _asset_root(self) -> Path:
-        home = Path(os.environ.get("PLAYER_HOME", Path.cwd())).resolve()
-        return Path(os.environ.get("PLAYER_ASSETS", home / "assets")).resolve()
+        home = Path(os.environ.get("JUKEBOX_HOME", Path.cwd())).resolve()
+        return Path(os.environ.get("JUKEBOX_ASSETS", home / "assets")).resolve()
 
     def _library_root(self) -> Path:
-        home = Path(os.environ.get("PLAYER_HOME", Path.cwd())).resolve()
-        return Path(os.environ.get("PLAYER_LIBRARY", home / "library")).resolve()
+        home = Path(os.environ.get("JUKEBOX_HOME", Path.cwd())).resolve()
+        return Path(os.environ.get("JUKEBOX_LIBRARY", home / "library")).resolve()
 
     def _path_from_source(self, value: object) -> Path | None:
         text = str(value or "").strip()
@@ -834,7 +834,7 @@ class TftPlayerDisplay:
 
         frame = int(payload.get("frame", self.frames) or 0)
         title = str(current.get("name") or "No track")
-        artist = str(current.get("artist") or current.get("album") or "Player")
+        artist = str(current.get("artist") or current.get("album") or "Jukebox")
         queue_name = str(state.get("queue_name") or "All Songs")
         paused = bool(state.get("paused", False))
         volume = int(state.get("volume", 0) or 0)
@@ -863,7 +863,7 @@ class TftPlayerDisplay:
             draw.line((12, y, 228, y), fill=grid)
 
         draw.rectangle((0, 0, self.width, 40), fill=header)
-        draw.text((12, 8), "PLAYER", font=load_font(15, True), fill=text_color)
+        draw.text((12, 8), "JUKEBOX", font=load_font(15, True), fill=text_color)
         draw.rounded_rectangle(
             (98, 7, 152, 27),
             radius=4,
@@ -1013,7 +1013,7 @@ class TftPlayerDisplay:
         draw = ImageDraw.Draw(image)
         draw.rectangle((0, 0, self.width, self.height), fill=(5, 5, 10))
         draw.rectangle((0, 0, self.width, 52), fill=(17, 11, 31))
-        draw.text((16, 15), "PLAYER", font=load_font(22, True), fill=(245, 239, 255))
+        draw.text((16, 15), "JUKEBOX", font=load_font(22, True), fill=(245, 239, 255))
         draw.text((16, 76), "ILI9341 TFT", font=load_font(18, True), fill=(190, 122, 255))
         draw.text((16, 110), f"IP {local_ip()}", font=load_font(14), fill=(226, 214, 255))
         draw.text((16, 136), "PORT 8010", font=load_font(14), fill=(226, 214, 255))
@@ -1030,15 +1030,15 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
-def create_display() -> OledPlayerDisplay | TftPlayerDisplay:
-    kind = str(os.environ.get("PLAYER_DISPLAY", "oled")).strip().lower()
+def create_display() -> OledJukeboxDisplay | TftJukeboxDisplay:
+    kind = str(os.environ.get("JUKEBOX_DISPLAY", "oled")).strip().lower()
     if kind in {"tft", "ili9341", "lcd240", "lcd"}:
-        return TftPlayerDisplay(
-            enabled=os.environ.get("PLAYER_TFT", "1") != "0",
-            bus=env_int("PLAYER_TFT_SPI_BUS", 0),
-            device=env_int("PLAYER_TFT_SPI_DEVICE", 0),
-            dc_pin=env_int("PLAYER_TFT_DC", 25),
-            rst_pin=env_int("PLAYER_TFT_RST", 24),
-            speed_hz=env_int("PLAYER_TFT_SPEED", 24_000_000),
+        return TftJukeboxDisplay(
+            enabled=os.environ.get("JUKEBOX_TFT", "1") != "0",
+            bus=env_int("JUKEBOX_TFT_SPI_BUS", 0),
+            device=env_int("JUKEBOX_TFT_SPI_DEVICE", 0),
+            dc_pin=env_int("JUKEBOX_TFT_DC", 25),
+            rst_pin=env_int("JUKEBOX_TFT_RST", 24),
+            speed_hz=env_int("JUKEBOX_TFT_SPEED", 24_000_000),
         )
-    return OledPlayerDisplay(enabled=os.environ.get("PLAYER_OLED", "1") != "0")
+    return OledJukeboxDisplay(enabled=os.environ.get("JUKEBOX_OLED", "1") != "0")

@@ -9,14 +9,14 @@ import time
 from pathlib import Path
 
 
-class MpvPlayer:
+class MpvJukebox:
     def __init__(self, ipc_path: Path):
         self.ipc_path = ipc_path
-        self.audio_driver = os.environ.get("PLAYER_AUDIO_DRIVER", "").strip()
-        self.audio_device = os.environ.get("PLAYER_AUDIO_DEVICE", "").strip()
-        self.alsa_card = os.environ.get("PLAYER_ALSA_CARD", "").strip()
-        self.alsa_control = os.environ.get("PLAYER_ALSA_CONTROL", "Headphone").strip()
-        self.alsa_volume = os.environ.get("PLAYER_ALSA_VOLUME", "").strip()
+        self.audio_driver = os.environ.get("JUKEBOX_AUDIO_DRIVER", "").strip()
+        self.audio_device = os.environ.get("JUKEBOX_AUDIO_DEVICE", "").strip()
+        self.alsa_card = os.environ.get("JUKEBOX_ALSA_CARD", "").strip()
+        self.alsa_control = os.environ.get("JUKEBOX_ALSA_CONTROL", "Headphone").strip()
+        self.alsa_volume = os.environ.get("JUKEBOX_ALSA_VOLUME", "").strip()
         self.process: subprocess.Popen[bytes] | None = None
         self.request_id = 0
 
@@ -141,5 +141,5 @@ class MpvPlayer:
 def default_ipc_path(home: Path) -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     if runtime_dir:
-        return Path(runtime_dir) / "player-mpv.sock"
-    return home / ".player-mpv.sock"
+        return Path(runtime_dir) / "jukebox-mpv.sock"
+    return home / ".jukebox-mpv.sock"

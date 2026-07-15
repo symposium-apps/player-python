@@ -19,7 +19,7 @@
       "format": "m3u8",
       "cover": "../assets/covers/source/the_beatles_abbey_road.jpg",
       "cover_lcd": "../assets/covers/lcd/the_beatles_abbey_road_48x48_mono.png",
-      "cover_lcd_path": "D:\\Apps\\Player\\assets\\covers\\lcd\\the_beatles_abbey_road_48x48_mono.png",
+      "cover_lcd_path": "D:\\Apps\\Jukebox\\assets\\covers\\lcd\\the_beatles_abbey_road_48x48_mono.png",
       "track_ids": [
         "fe9e8fedfcbeb2b7",
         "72a964f84807deab",
@@ -49,7 +49,7 @@
       "format": "m3u8",
       "cover": "../assets/covers/source/pink_floyd_dark_side_of_the_moon.jpg",
       "cover_lcd": "../assets/covers/lcd/pink_floyd_dark_side_of_the_moon_48x48_mono.png",
-      "cover_lcd_path": "D:\\Apps\\Player\\assets\\covers\\lcd\\pink_floyd_dark_side_of_the_moon_48x48_mono.png",
+      "cover_lcd_path": "D:\\Apps\\Jukebox\\assets\\covers\\lcd\\pink_floyd_dark_side_of_the_moon_48x48_mono.png",
       "track_ids": [
         "b9565e4a88f9542a",
         "7778f2010c7086f9",
@@ -79,7 +79,7 @@
       "format": "m3u8",
       "cover": "../assets/covers/source/michael_jackson_thriller.jpg",
       "cover_lcd": "../assets/covers/lcd/michael_jackson_thriller_48x48_mono.png",
-      "cover_lcd_path": "D:\\Apps\\Player\\assets\\covers\\lcd\\michael_jackson_thriller_48x48_mono.png",
+      "cover_lcd_path": "D:\\Apps\\Jukebox\\assets\\covers\\lcd\\michael_jackson_thriller_48x48_mono.png",
       "track_ids": [
         "1024a5502e99a7c7",
         "9141611dadb8691c",
@@ -109,7 +109,7 @@
       "format": "m3u8",
       "cover": "../assets/covers/source/nirvana_nevermind.jpg",
       "cover_lcd": "../assets/covers/lcd/nirvana_nevermind_48x48_mono.png",
-      "cover_lcd_path": "D:\\Apps\\Player\\assets\\covers\\lcd\\nirvana_nevermind_48x48_mono.png",
+      "cover_lcd_path": "D:\\Apps\\Jukebox\\assets\\covers\\lcd\\nirvana_nevermind_48x48_mono.png",
       "track_ids": [
         "f824a8822683eb1a",
         "dc3ccc46b6adde33",
@@ -139,7 +139,7 @@
       "format": "m3u8",
       "cover": "../assets/covers/source/fleetwood_mac_rumours.jpg",
       "cover_lcd": "../assets/covers/lcd/fleetwood_mac_rumours_48x48_mono.png",
-      "cover_lcd_path": "D:\\Apps\\Player\\assets\\covers\\lcd\\fleetwood_mac_rumours_48x48_mono.png",
+      "cover_lcd_path": "D:\\Apps\\Jukebox\\assets\\covers\\lcd\\fleetwood_mac_rumours_48x48_mono.png",
       "track_ids": [
         "7132a2b10867d1b0",
         "8cf24e252630473f",

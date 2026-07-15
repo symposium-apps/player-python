@@ -11,14 +11,14 @@ from urllib.request import Request, urlopen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-os.environ.setdefault("PLAYER_HOME", str(PROJECT_ROOT))
+os.environ.setdefault("JUKEBOX_HOME", str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from player import server  # noqa: E402
+from jukebox import server  # noqa: E402
 from scripts.build_cover_art import prepare_art, relative_from_playlist  # noqa: E402
 
 
-USER_AGENT = "PlayerPrototype/0.1.0 (local demo library)"
+USER_AGENT = "JukeboxPrototype/0.1.0 (local demo library)"
 SAMPLE_RATE = 8_000
 
 

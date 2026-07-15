@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
-from .audio import MpvPlayer, default_ipc_path
+from .audio import MpvJukebox, default_ipc_path
 from .display import create_display
 
 
@@ -54,15 +54,14 @@ DEFAULT_STATE = {
 }
 
 
-HOME = Path(os.environ.get("PLAYER_HOME", Path.cwd() / ".sym-data")).resolve()
-LIBRARY_DIR = Path(os.environ.get("PLAYER_LIBRARY", HOME / "library")).resolve()
-PLAYLIST_DIR = Path(os.environ.get("PLAYER_PLAYLISTS", HOME / "playlists")).resolve()
-ASSETS_DIR = Path(os.environ.get("PLAYER_ASSETS", HOME / "assets")).resolve()
-STATE_FILE = Path(os.environ.get("PLAYER_STATE", HOME / "state.json")).resolve()
+HOME = Path(os.environ.get("JUKEBOX_HOME", Path.cwd() / ".sym-data")).resolve()
+LIBRARY_DIR = Path(os.environ.get("JUKEBOX_LIBRARY", HOME / "library")).resolve()
+PLAYLIST_DIR = Path(os.environ.get("JUKEBOX_PLAYLISTS", HOME / "playlists")).resolve()
+ASSETS_DIR = Path(os.environ.get("JUKEBOX_ASSETS", HOME / "assets")).resolve()
 
 LOCK = threading.RLock()
 DISPLAY_LOCK = threading.RLock()
-PLAYER = MpvPlayer(default_ipc_path(HOME))
+JUKEBOX = MpvJukebox(default_ipc_path(HOME))
 STATE = DEFAULT_STATE.copy()
 DISPLAY = create_display()
 DISPLAY_LAST_SIGNATURE = ""
@@ -712,32 +711,21 @@ def playlist_path(slug: str) -> Path:
 
 def load_state() -> None:
     global STATE
-    if not STATE_FILE.exists():
-        STATE = DEFAULT_STATE.copy()
-        return
-    try:
-        loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        STATE = DEFAULT_STATE.copy()
-        return
-    merged = DEFAULT_STATE.copy()
-    merged.update({k: v for k, v in loaded.items() if k in merged})
-    if merged.get("queue_name") == "All Tracks":
-        merged["queue_name"] = "All Songs"
-    STATE = merged
+    # Browser playback is intentionally client-local. The server keeps only
+    # ephemeral state for optional directly-attached hardware controls.
+    STATE = DEFAULT_STATE.copy()
 
 
 def save_state() -> None:
     STATE["updated_at"] = int(time.time())
-    STATE_FILE.write_text(json.dumps(STATE, indent=2), encoding="utf-8")
     update_display()
 
 
-def player_status() -> dict[str, object]:
-    snapshot = PLAYER.snapshot()
+def jukebox_status() -> dict[str, object]:
+    snapshot = JUKEBOX.snapshot()
     return {
         "backend": "mpv",
-        "available": PLAYER.available,
+        "available": JUKEBOX.available,
         "running": snapshot.get("running", False),
         "audio_driver": snapshot.get("audio_driver", ""),
         "audio_device": snapshot.get("audio_device", ""),
@@ -776,17 +764,17 @@ def storage_payload(force: bool = False) -> dict[str, object]:
         "used": used,
         "free": free,
     }
-    if not force and os.environ.get("PLAYER_FAST_STORAGE", "1") != "0":
+    if not force and os.environ.get("JUKEBOX_FAST_STORAGE", "1") != "0":
         with LOCK:
             if STORAGE_CACHE is None:
-                return {**base, "player": 0, "library": 0, "playlists": 0, "assets": 0}
+                return {**base, "jukebox": 0, "library": 0, "playlists": 0, "assets": 0}
             cached = STORAGE_CACHE.copy()
             cached.update(base)
             return cached
 
     payload = {
         **base,
-        "player": directory_size(HOME),
+        "jukebox": directory_size(HOME),
         "library": directory_size(LIBRARY_DIR),
         "playlists": directory_size(PLAYLIST_DIR),
         "assets": directory_size(ASSETS_DIR),
@@ -806,7 +794,7 @@ def status_payload() -> dict[str, object]:
         "state": STATE,
         "current_track": current,
         "library_count": len(tracks),
-        "player": player_status(),
+        "jukebox": jukebox_status(),
         "display": DISPLAY.snapshot(),
         "storage": storage_payload(),
     }
@@ -932,7 +920,7 @@ def reinitialize_display() -> dict[str, object]:
 
 def maybe_reinitialize_display_for_input() -> None:
     global DISPLAY_LAST_INPUT_REINIT, DISPLAY_LAST_SIGNATURE
-    if os.environ.get("PLAYER_TFT_REINIT_ON_INPUT", "0") == "0":
+    if os.environ.get("JUKEBOX_TFT_REINIT_ON_INPUT", "0") == "0":
         return
     now = time.monotonic()
     minimum_gap = 1.0
@@ -966,12 +954,12 @@ def play_track(
             set_queue([str(track["id"]) for track in scan_library()], "All Songs")
 
         path = path_for_track(track_id)
-        if PLAYER.available:
+        if JUKEBOX.available:
             if output:
-                PLAYER.play(path)
-                PLAYER.volume(int(STATE.get("volume", 70) or 70))
+                JUKEBOX.play(path)
+                JUKEBOX.volume(int(STATE.get("volume", 70) or 70))
             else:
-                PLAYER.stop()
+                JUKEBOX.stop()
         STATE["current_track_id"] = track_id
         STATE["paused"] = False
         save_state()
@@ -980,18 +968,18 @@ def play_track(
 
 def stop_playback(output: bool = True) -> dict[str, object]:
     with LOCK:
-        if PLAYER.available and output:
-            PLAYER.stop()
+        if JUKEBOX.available and output:
+            JUKEBOX.stop()
         STATE["paused"] = False
         save_state()
         return status_payload()
 
 
-def reset_player_state(output: bool = True) -> dict[str, object]:
+def reset_jukebox_state(output: bool = True) -> dict[str, object]:
     global STATE
     with LOCK:
-        if PLAYER.available and output:
-            PLAYER.stop()
+        if JUKEBOX.available and output:
+            JUKEBOX.stop()
         STATE = {
             key: value.copy() if isinstance(value, list) else value
             for key, value in DEFAULT_STATE.items()
@@ -1003,11 +991,11 @@ def reset_player_state(output: bool = True) -> dict[str, object]:
 
 def pause_playback(paused: bool, output: bool = True) -> dict[str, object]:
     with LOCK:
-        if PLAYER.available:
+        if JUKEBOX.available:
             if output:
-                PLAYER.pause(paused)
+                JUKEBOX.pause(paused)
             else:
-                PLAYER.stop()
+                JUKEBOX.stop()
         STATE["paused"] = bool(paused)
         save_state()
         return status_payload()
@@ -1016,8 +1004,8 @@ def pause_playback(paused: bool, output: bool = True) -> dict[str, object]:
 def set_volume(value: int, output: bool = True) -> dict[str, object]:
     with LOCK:
         value = max(0, min(100, int(value)))
-        if PLAYER.available and output:
-            PLAYER.volume(value)
+        if JUKEBOX.available and output:
+            JUKEBOX.volume(value)
         STATE["volume"] = value
         save_state()
         return status_payload()
@@ -1070,7 +1058,7 @@ def perform_transport_action(action: str) -> None:
     elif action == "refresh":
         STATE["ui_message"] = "REFRESH"
     elif action == "about":
-        STATE["ui_message"] = f"PLAYER {__version__}"
+        STATE["ui_message"] = f"JUKEBOX {__version__}"
     else:
         raise ValueError(f"Unknown transport action: {action}")
 
@@ -1702,8 +1690,8 @@ def delete_tracks(track_ids: list[str]) -> dict[str, object]:
                 continue
 
         if str(STATE.get("current_track_id") or "") in deleted:
-            if PLAYER.available:
-                PLAYER.stop()
+            if JUKEBOX.available:
+                JUKEBOX.stop()
             STATE["current_track_id"] = None
             STATE["paused"] = False
 
@@ -1771,7 +1759,7 @@ def manage_page() -> str:
     return Path(__file__).with_name("manage.html").read_text(encoding="utf-8")
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"Player/{__version__}"
+    server_version = f"Jukebox/{__version__}"
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {self.address_string()} {fmt % args}")
@@ -1815,7 +1803,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/mini-sym":
                 self.send_html(html_page())
             elif parsed.path == "/api/reset":
-                self.send_json(reset_player_state())
+                self.send_json(reset_jukebox_state())
             elif parsed.path == "/api/display/reinit":
                 self.send_json(reinitialize_display())
             elif parsed.path == "/api/library":
@@ -1864,7 +1852,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(stop_playback(output=bool(body.get("output", True))))
             elif parsed.path == "/api/reset":
                 body = self.read_json()
-                self.send_json(reset_player_state(output=bool(body.get("output", True))))
+                self.send_json(reset_jukebox_state(output=bool(body.get("output", True))))
             elif parsed.path == "/api/next":
                 body = self.read_json()
                 self.send_json(step_track(1, output=bool(body.get("output", True))))
@@ -2067,7 +2055,7 @@ def html_page() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Player</title>
+  <title>Jukebox</title>
   <style>
     :root {
       color-scheme: dark;
@@ -2126,7 +2114,7 @@ def html_page() -> str:
 <body>
   <main>
     <div class="case">
-      <canvas id="lcd" width="128" height="64" aria-label="Player LCD screen"></canvas>
+      <canvas id="lcd" width="128" height="64" aria-label="Jukebox LCD screen"></canvas>
     </div>
     <div class="hint">Up / Down moves. Enter selects. M opens file manager.</div>
   </main>
@@ -2271,7 +2259,7 @@ function commitScreen(data, force = false) {
 
 function renderLoading(text) {
   clear();
-  label("PLAYER", 3, 10);
+  label("JUKEBOX", 3, 10);
   ctx.beginPath();
   ctx.moveTo(0, 13.5);
   ctx.lineTo(128, 13.5);
@@ -2298,7 +2286,7 @@ function render() {
   const hasPlaylistCover = hasPlaylistCoverView(screen);
 
   if (path.length === 1) {
-    label(frame % 8 < 6 ? "PLAYER" : "PL>YER", 3, 10);
+    label(frame % 8 < 6 ? "JUKEBOX" : "PL>YER", 3, 10);
     label(mode, 92, 10);
     ctx.beginPath();
     ctx.moveTo(0, 13.5);
@@ -2454,7 +2442,7 @@ setInterval(() => {
 MINI_TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Player</title>
+<title>Jukebox</title>
 <style>
 :root{color-scheme:dark;}
 *{box-sizing:border-box;margin:0;}
@@ -2470,7 +2458,7 @@ body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#050507;c
 .artist{font-size:11px;color:#9a93b3;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
 </style></head>
 <body>
-<div class="badge"><span class="dot __DOT__" id="dot"></span><span id="status">Player · __STATUS__</span></div>
+<div class="badge"><span class="dot __DOT__" id="dot"></span><span id="status">Jukebox · __STATUS__</span></div>
 <div class="title" id="title">__TITLE__</div>
 <div class="artist" id="artist">__ARTIST__</div>
 <script>
@@ -2484,12 +2472,12 @@ async function tick(){
       const paused=!!st.paused;
       document.getElementById('title').textContent=tr.title||'Unknown';
       document.getElementById('artist').textContent=tr.artist||'';
-      status.textContent='Player · '+(paused?'Paused':'Now Playing');
+      status.textContent='Jukebox · '+(paused?'Paused':'Now Playing');
       dot.className='dot'+(paused?' paused':'');
     }else{
       document.getElementById('title').textContent='Nothing playing';
       document.getElementById('artist').textContent=(d.library_count||0)+' tracks in library';
-      status.textContent='Player · Idle';
+      status.textContent='Jukebox · Idle';
       dot.className='dot idle';
     }
   }catch(e){}
@@ -2526,24 +2514,24 @@ def mini_sym_page() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Player MP3 module server")
+    parser = argparse.ArgumentParser(description="Jukebox MP3 module server")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8010")))
     args = parser.parse_args()
 
     ensure_dirs()
     load_state()
-    print(f"Player {__version__} serving {HOME} on http://{args.host}:{args.port}")
-    print(f"Audio backend: mpv {'found' if PLAYER.available else 'missing'}")
+    print(f"Jukebox {__version__} serving {HOME} on http://{args.host}:{args.port}")
+    print(f"Audio backend: mpv {'found' if JUKEBOX.available else 'missing'}")
     update_display(force=True)
-    threading.Thread(target=display_loop, name="player-display-loop", daemon=True).start()
+    threading.Thread(target=display_loop, name="jukebox-display-loop", daemon=True).start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        PLAYER.shutdown()
+        JUKEBOX.shutdown()
         server.server_close()
 
 

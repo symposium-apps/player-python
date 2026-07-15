@@ -6,7 +6,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Player</title>
+  <title>Jukebox</title>
   <style>
     :root {
       color-scheme: dark;
@@ -75,13 +75,14 @@ HTML = r"""<!doctype html>
 <body>
   <main>
     <div class="case">
-      <canvas id="lcd" width="240" height="320" tabindex="0" aria-label="Player 240 by 320 LCD screen"></canvas>
+      <canvas id="lcd" width="240" height="320" tabindex="0" aria-label="Jukebox mini player"></canvas>
     </div>
     <div class="hint">
-      Home: arrows focus controls, Enter selects, Space play.<br>
-      Menu: Up / Down move, Left back, Right / Enter open. M manager. R LCD reset.
+      Arrows focus controls, Enter selects, Space plays or pauses.<br>
+      M or Menu opens the full Jukebox library.
     </div>
   </main>
+  <audio id="miniAudio" preload="metadata"></audio>
 
 <script>
 const W = 240;
@@ -107,6 +108,75 @@ let toast = "";
 let toastUntil = 0;
 const coverCache = new Map();
 let hotZones = [];
+let tracks = [];
+let focus = 2;
+let playback = loadPlayback();
+const audio = document.getElementById("miniAudio");
+
+function loadPlayback() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("jukebox.playback.v1") || "null") || {};
+    return {
+      currentTrackId: String(raw.currentTrackId || ""),
+      queue: Array.isArray(raw.queue) ? raw.queue.map(String) : [],
+      queueName: String(raw.queueName || "Queue"),
+      paused: raw.paused !== false,
+      volume: Math.max(0, Math.min(100, Number(raw.volume ?? 70))),
+      position: Math.max(0, Number(raw.position || 0))
+    };
+  } catch (_) {
+    return { currentTrackId: "", queue: [], queueName: "Queue", paused: true, volume: 70, position: 0 };
+  }
+}
+
+function savePlayback() {
+  localStorage.setItem("jukebox.playback.v1", JSON.stringify(playback));
+}
+
+function trackById(id) {
+  return tracks.find(track => String(track.id) === String(id)) || null;
+}
+
+function mediaUrl(id) {
+  return `/media/${encodeURIComponent(String(id))}`;
+}
+
+function syncScreen() {
+  const current = trackById(playback.currentTrackId);
+  if (!current) playback.currentTrackId = "";
+  screen = {
+    ok: true,
+    path: ["Home"],
+    cursor: focus,
+    library_count: tracks.length,
+    current_track: current,
+    state: {
+      queue: playback.queue,
+      queue_name: playback.queueName,
+      paused: playback.paused,
+      volume: playback.volume,
+      ui_cursor: focus
+    }
+  };
+  render();
+}
+
+function prepareAudio() {
+  const current = trackById(playback.currentTrackId);
+  audio.volume = playback.volume / 100;
+  if (!current) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    return;
+  }
+  if (audio.dataset.trackId !== String(current.id)) {
+    audio.pause();
+    audio.src = mediaUrl(current.id);
+    audio.dataset.trackId = String(current.id);
+    audio.load();
+  }
+}
 
 const colors = {
   bg: "#05050a",
@@ -325,7 +395,7 @@ function renderHome(frame) {
   const current = screen.current_track || {};
   const palette = homeTheme();
   const title = current.name || "No track";
-  const artist = current.artist || current.album || "Player";
+  const artist = current.artist || current.album || "Jukebox";
   const queue = state.queue_name || "All Songs";
   const paused = !!state.paused;
   const volume = Number(state.volume || 0);
@@ -345,7 +415,7 @@ function renderHome(frame) {
 
   ctx.fillStyle = palette.header;
   ctx.fillRect(0, 0, W, 40);
-  text("PLAYER", 12, 8, 15, palette.text, "bold");
+  text("JUKEBOX", 12, 8, 15, palette.text, "bold");
   headerButton("MENU", 90, "menu", focus === 0, 54, palette);
 
   const coverX = 40;
@@ -443,7 +513,7 @@ function renderLoading(message) {
   clear();
   ctx.fillStyle = colors.header;
   ctx.fillRect(0, 0, W, 52);
-  text("PLAYER", 16, 15, 22, colors.text, "bold");
+  text("JUKEBOX", 16, 15, 22, colors.text, "bold");
   text(String(message || "LOADING").toUpperCase(), 34, 231, 13, colors.cyan);
   roundRect(16, 210, 208, 60, 6, null, colors.cyan, 2);
 }
@@ -463,42 +533,66 @@ function render() {
 }
 
 async function refresh() {
-  if (inputBusy || refreshBusy) return;
+  if (refreshBusy) return;
   refreshBusy = true;
-  const id = ++requestId;
   try {
-    const data = await api("/api/screen");
-    if (id !== requestId) return;
-    screen = data;
-    render();
+    const data = await api("/api/library");
+    tracks = data.tracks || [];
+    playback.queue = playback.queue.filter(id => trackById(id));
+    syncScreen();
+    prepareAudio();
   } finally {
     refreshBusy = false;
   }
 }
 
 async function input(action) {
-  inputBusy = true;
-  const id = ++requestId;
-  try {
-    const data = await api("/api/input", {
-      method: "POST",
-      body: JSON.stringify({ action })
-    });
-    if (id === requestId) {
-      screen = data;
-      render();
-      nextPollAt = Date.now() + 900;
-    }
-  } finally {
-    inputBusy = false;
+  if (action === "menu") {
+    window.location.href = "/";
+    return;
   }
+  if (action === "left" || action === "up") focus = Math.max(0, focus - 1);
+  else if (action === "right" || action === "down") focus = Math.min(3, focus + 1);
+  else if (action === "select") {
+    return input(["menu", "previous", "playpause", "next"][focus]);
+  } else if (action === "previous" || action === "next") {
+    const queue = playback.queue.length ? playback.queue : tracks.map(track => String(track.id));
+    if (!queue.length) return;
+    const currentIndex = Math.max(0, queue.indexOf(String(playback.currentTrackId)));
+    const offset = action === "next" ? 1 : -1;
+    playback.currentTrackId = queue[(currentIndex + offset + queue.length) % queue.length];
+    playback.queue = queue;
+    playback.position = 0;
+    playback.paused = false;
+    savePlayback();
+    syncScreen();
+    prepareAudio();
+    await audio.play();
+  } else if (action === "playpause") {
+    if (!playback.currentTrackId && tracks.length) {
+      playback.currentTrackId = String(tracks[0].id);
+      playback.queue = tracks.map(track => String(track.id));
+      playback.queueName = "All Songs";
+      playback.position = 0;
+      prepareAudio();
+    }
+    if (!playback.currentTrackId) return;
+    if (audio.paused) {
+      await audio.play();
+      playback.paused = false;
+    } else {
+      audio.pause();
+      playback.paused = true;
+    }
+    savePlayback();
+  }
+  syncScreen();
 }
 
 async function reinitDisplay() {
-  toast = "LCD RESET SENT";
+  toast = "JUKEBOX READY";
   toastUntil = Date.now() + 1200;
   render();
-  await api("/api/display/reinit");
 }
 
 canvas.addEventListener("click", event => {
@@ -527,7 +621,7 @@ function handleKeydown(event) {
   else if (event.key === " ") { event.preventDefault(); input("playpause"); }
   else if (event.key === "," || event.key.toLowerCase() === "p") { event.preventDefault(); input("previous"); }
   else if (event.key === "." || event.key.toLowerCase() === "n") { event.preventDefault(); input("next"); }
-  else if (event.key === "Escape" || event.key === "Backspace") { event.preventDefault(); input("back"); }
+  else if (event.key === "Escape" || event.key === "Backspace") { event.preventDefault(); window.location.href = "/"; }
   else if (event.key.toLowerCase() === "m") { event.preventDefault(); window.location.href = "/manage"; }
   else if (event.key.toLowerCase() === "r") { event.preventDefault(); reinitDisplay().catch(() => {}); }
 }
@@ -537,12 +631,18 @@ document.addEventListener("keydown", handleKeydown, { capture: true });
 renderLoading("loading");
 focusSimulator();
 refresh().catch(error => renderLoading(error.message.slice(0, 16)));
+audio.addEventListener("loadedmetadata", () => {
+  if (playback.position > 0 && Number.isFinite(audio.duration)) audio.currentTime = Math.min(playback.position, Math.max(0, audio.duration - .25));
+});
+audio.addEventListener("timeupdate", () => {
+  playback.position = Number(audio.currentTime || 0);
+  savePlayback();
+});
+audio.addEventListener("ended", () => input("next").catch(() => {}));
+audio.addEventListener("play", () => { playback.paused = false; savePlayback(); syncScreen(); });
+audio.addEventListener("pause", () => { playback.paused = true; savePlayback(); syncScreen(); });
 setInterval(() => {
   if (screen) render();
-  if (Date.now() >= nextPollAt && !inputBusy && !refreshBusy) {
-    nextPollAt = Date.now() + 2000;
-    refresh().catch(() => {});
-  }
 }, 150);
 </script>
 </body>

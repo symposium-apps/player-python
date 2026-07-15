@@ -1,12 +1,1 @@
-# Player 0.1.2 uses only Python standard-library modules for the core web app.
-# Install mpv on the Raspberry Pi for real audio output:
-#   sudo apt update && sudo apt install -y mpv
-#
-# For the SSD1306 OLED/LCD display:
-#   sudo apt install -y python3-pil python3-smbus i2c-tools
-#
-# For local cover-art conversion:
-#   python -m pip install Pillow
-#
-# For embedded audio metadata and album art extraction:
-#   sudo apt install -y python3-mutagen
+# Jukebox 1.0.0 uses only Python standard-library modules for the managed web app.
