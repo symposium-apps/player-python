@@ -1810,6 +1810,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(screen_payload())
             elif parsed.path == "/api/status":
                 self.send_json(status_payload())
+            elif parsed.path == "/_sym/health":
+                self.send_json({"ok": True, "status": "healthy", "version": __version__})
             elif parsed.path == "/api/reset":
                 self.send_json(reset_player_state())
             elif parsed.path == "/api/display/reinit":

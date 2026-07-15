@@ -1,0 +1,33 @@
+{
+  "$schema": "https://sympo.si/schemas/sym-app-v1.json",
+  "schema_version": 1,
+  "id": "player-python",
+  "name": "Player",
+  "description": "Raspberry Pi hosted MP3 player with a WiFi control panel, local music library, playlists, and OLED/LCD status.",
+  "runtime": {
+    "type": "python",
+    "health_path": "/_sym/health",
+    "startup_timeout_seconds": 30,
+    "shutdown_timeout_seconds": 10
+  },
+  "configuration": {
+    "environment": [],
+    "secrets": []
+  },
+  "integrations": [],
+  "permissions": [
+    {
+      "id": "network.local",
+      "reason": "Serve the control panel and stream local audio to browsers on the local network."
+    }
+  ],
+  "data": {
+    "persistent_paths": [".player"]
+  },
+  "marketplace": {
+    "subtitle": "Local music, streamed to any browser on your network",
+    "category": "content",
+    "icon": "assets/icon.svg",
+    "accent_color": "#7c3aed"
+  }
+}

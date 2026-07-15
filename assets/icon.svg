@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Player">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a1030"/>
+      <stop offset="1" stop-color="#050507"/>
+    </linearGradient>
+    <linearGradient id="note" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a855f7"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="104" fill="none" stroke="#7c3aed" stroke-opacity="0.55" stroke-width="6"/>
+  <g fill="url(#note)">
+    <rect x="196" y="120" width="26" height="212" rx="8"/>
+    <rect x="330" y="96" width="26" height="212" rx="8"/>
+    <path d="M196 120 L356 96 V150 L196 174 Z"/>
+    <ellipse cx="170" cy="336" rx="52" ry="40"/>
+    <ellipse cx="304" cy="312" rx="52" ry="40"/>
+  </g>
+</svg>

@@ -1,0 +1,7 @@
+{
+  "name": "player-python",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Raspberry Pi hosted MP3 player with a WiFi control panel, local library, playlists, and OLED/LCD status.",
+  "homepage": "https://github.com/symposium-apps/player-python#readme"
+}
