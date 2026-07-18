@@ -54,10 +54,11 @@ DEFAULT_STATE = {
 }
 
 
-HOME = Path(os.environ.get("JUKEBOX_HOME", Path.cwd() / ".sym-data")).resolve()
-LIBRARY_DIR = Path(os.environ.get("JUKEBOX_LIBRARY", HOME / "library")).resolve()
-PLAYLIST_DIR = Path(os.environ.get("JUKEBOX_PLAYLISTS", HOME / "playlists")).resolve()
-ASSETS_DIR = Path(os.environ.get("JUKEBOX_ASSETS", HOME / "assets")).resolve()
+HOME = Path(os.environ.get("JUKEBOX_HOME") or os.environ.get("SYM_APP_DATA_DIR") or Path.cwd() / ".sym-data").resolve()
+USER_DATA = Path(os.environ.get("SYM_APP_USER_DATA_DIR", HOME)).resolve()
+LIBRARY_DIR = Path(os.environ.get("JUKEBOX_LIBRARY", USER_DATA / "Music")).resolve()
+PLAYLIST_DIR = Path(os.environ.get("JUKEBOX_PLAYLISTS", USER_DATA / "Playlists")).resolve()
+ASSETS_DIR = Path(os.environ.get("JUKEBOX_ASSETS", USER_DATA / "Artwork")).resolve()
 
 LOCK = threading.RLock()
 DISPLAY_LOCK = threading.RLock()

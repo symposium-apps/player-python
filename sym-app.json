@@ -17,7 +17,18 @@
   "integrations": [],
   "permissions": [],
   "data": {
-    "persistent_paths": [".sym-data"]
+    "persistent_paths": [".sym-data"],
+    "user_data": {
+      "enabled": true,
+      "description": "Music, artwork, and playlists managed by the user or their agent.",
+      "label": "Music library",
+      "quota_mb": 51200,
+      "content_types": ["audio/*", "image/jpeg", "image/png", "image/webp"],
+      "directories": ["Music", "Playlists", "Artwork"]
+    },
+    "private_state": true,
+    "cache": true,
+    "legacy_persistent_migration": "user_data"
   },
   "marketplace": {
     "subtitle": "Your music library, streamed privately in each browser",
