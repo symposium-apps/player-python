@@ -1,6 +1,6 @@
 {
   "name": "jukebox",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "private": true,
   "description": "Shared VPS music library with independent browser playback.",
   "homepage": "https://github.com/symposium-apps/jukebox#readme",
