@@ -2915,7 +2915,7 @@ const browserSession = (() => {
 if (browserSession) {
   const policy = location.protocol === "https:" ? "; SameSite=None; Secure; Partitioned" : "; SameSite=Lax";
   document.cookie = `jukebox_session=${browserSession}; Path=/; Max-Age=${180 * 24 * 60 * 60}${policy}`;
-} else {
+} else if (location.pathname === "/app") {
   location.replace("/");
 }
 
