@@ -70,6 +70,7 @@ API_MAX_UPLOAD_BYTES = int(os.environ.get("JUKEBOX_API_MAX_UPLOAD_BYTES", str(4 
 USER_DATA_QUOTA_BYTES = int(os.environ.get("JUKEBOX_USER_DATA_QUOTA_BYTES", str(50 * 1024 * 1024 * 1024)))
 SESSION_COOKIE = "jukebox_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
+APP_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "icon.svg"
 
 LOCK = threading.RLock()
 DISPLAY_LOCK = threading.RLock()
@@ -216,7 +217,7 @@ def login_gate(error: bool = False) -> str:
     error_markup = '<p class="error">That password was not accepted.</p>' if error else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Unlock Jukebox</title><style>
+<title>Unlock Jukebox</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#05050a;color:#f7f4ff;font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px}}
 .gate{{width:min(420px,100%);border:1px solid #27202f;border-radius:16px;background:#0d0a12;padding:32px;box-shadow:0 24px 80px rgba(0,0,0,.5)}}
 .mark{{display:flex;gap:7px;align-items:center;height:42px;margin-bottom:24px}}.mark i{{display:block;width:7px;border-radius:7px}}.mark i:nth-child(1){{height:18px;background:#fbbf24}}.mark i:nth-child(2){{height:34px;background:#fb923c}}.mark i:nth-child(3){{height:42px;background:#f43f5e}}.mark i:nth-child(4){{height:28px;background:#e879f9}}.mark i:nth-child(5){{height:14px;background:#c084fc}}
@@ -2195,8 +2196,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "status": "healthy", "version": __version__})
                 return
             if path == "/favicon.ico":
-                self.send_response(HTTPStatus.NO_CONTENT)
+                data = APP_ICON_PATH.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
+                self.wfile.write(data)
                 return
             api_v1 = path.startswith("/api/v1/") or path in {"/api/v1", "/api/agent/bootstrap"}
             html_route = path in {"/", "/manage", "/mini-sym"}

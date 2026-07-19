@@ -94,7 +94,13 @@ class ManagementApiTest(unittest.TestCase):
         return status, response_headers, json.loads(raw)
 
     def test_complete_authenticated_management_flow(self) -> None:
-        self.assertEqual(self.request("GET", "/")[0], 200)
+        status, _, page = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'<link rel="icon" href="/favicon.ico" type="image/svg+xml">', page)
+        status, headers, favicon = self.request("GET", "/favicon.ico")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/svg+xml")
+        self.assertIn(b'aria-label="Jukebox"', favicon)
         missing = self.json_request("GET", "/api/v1/context")
         wrong_without_config = self.json_request("GET", "/api/v1/context", password="wrong")
         self.assertEqual(missing[0], 401)
@@ -105,7 +111,9 @@ class ManagementApiTest(unittest.TestCase):
         self.assertTrue((api_dir / "README.txt").is_file())
         (api_dir / "password.txt").write_text(PASSWORD + "\n", encoding="utf-8")
 
-        self.assertEqual(self.request("GET", "/")[0], 401)
+        status, _, login_page = self.request("GET", "/")
+        self.assertEqual(status, 401)
+        self.assertIn(b'<link rel="icon" href="/favicon.ico" type="image/svg+xml">', login_page)
         wrong = self.json_request("GET", "/api/v1/context", password="wrong")
         self.assertEqual(wrong[0], 401)
         self.assertEqual(wrong[2], missing[2])
