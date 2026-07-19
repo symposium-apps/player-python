@@ -124,6 +124,8 @@ class ManagementApiTest(unittest.TestCase):
         status, _, login_page = self.request("GET", "/")
         self.assertEqual(status, 401)
         self.assertIn(b'<link rel="icon" href="/favicon-32x32.png?v=20260720-1" type="image/png" sizes="32x32">', login_page)
+        self.assertIn(b"jukebox.browser-session.v1", login_page)
+        self.assertNotIn(b"localStorage.setItem(storageKey, password", login_page)
         wrong = self.json_request("GET", "/api/v1/context", password="wrong")
         self.assertEqual(wrong[0], 401)
         self.assertEqual(wrong[2], missing[2])
@@ -140,6 +142,25 @@ class ManagementApiTest(unittest.TestCase):
         self.assertIn(f"Max-Age={180 * 24 * 60 * 60}", headers["Set-Cookie"])
         cookie = headers["Set-Cookie"].split(";", 1)[0]
         self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0], 200)
+        status, headers, raw = self.request(
+            "POST",
+            "/auth/login",
+            {"password": PASSWORD},
+            {"X-Forwarded-Proto": "https"},
+        )
+        self.assertEqual(status, 200)
+        browser_session = json.loads(raw)["session"]
+        self.assertNotIn(PASSWORD, browser_session)
+        self.assertEqual(self.request("GET", "/api/library", headers={"X-Jukebox-Session": browser_session})[0], 200)
+        status, headers, _ = self.request(
+            "POST",
+            "/auth/session",
+            {"session": browser_session},
+            {"X-Forwarded-Proto": "https"},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.assertEqual(self.request("POST", "/auth/session", {"session": "invalid"})[0], 401)
         self.assertEqual(self.request("POST", "/api/v1/library/rescan", {}, {"Cookie": cookie})[0], 403)
         self.assertEqual(
             self.request(
@@ -279,6 +300,40 @@ class StartupCompatibilityTest(unittest.TestCase):
             release_playback.set()
             holder.join(timeout=2)
             creator.join(timeout=2)
+
+    def test_library_cache_does_not_wait_for_playback_lock(self) -> None:
+        from jukebox import server
+
+        playback_locked = threading.Event()
+        release_playback = threading.Event()
+        library_read = threading.Event()
+        previous_cache = server.LIBRARY_CACHE
+        previous_expiry = server.LIBRARY_CACHE_EXPIRES
+        server.LIBRARY_CACHE = [{"id": "cached-track"}]
+        server.LIBRARY_CACHE_EXPIRES = time.monotonic() + 60
+
+        def hold_playback_lock() -> None:
+            with server.LOCK:
+                playback_locked.set()
+                release_playback.wait(timeout=5)
+
+        def read_library_cache() -> None:
+            if server.scan_library() == [{"id": "cached-track"}]:
+                library_read.set()
+
+        holder = threading.Thread(target=hold_playback_lock, daemon=True)
+        reader = threading.Thread(target=read_library_cache, daemon=True)
+        holder.start()
+        self.assertTrue(playback_locked.wait(timeout=1))
+        reader.start()
+        try:
+            self.assertTrue(library_read.wait(timeout=1), "library API blocked on the unrelated playback lock")
+        finally:
+            release_playback.set()
+            holder.join(timeout=2)
+            reader.join(timeout=2)
+            server.LIBRARY_CACHE = previous_cache
+            server.LIBRARY_CACHE_EXPIRES = previous_expiry
 
     def test_embedded_tags_and_artwork_are_extracted(self) -> None:
         from mutagen.id3 import APIC, TALB, TIT2, TPE1  # type: ignore[import-not-found]

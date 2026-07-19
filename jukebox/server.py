@@ -82,6 +82,7 @@ BROWSER_ICON_PATHS = {
 
 LOCK = threading.RLock()
 AUTH_LOCK = threading.RLock()
+CACHE_LOCK = threading.RLock()
 DISPLAY_LOCK = threading.RLock()
 JUKEBOX = MpvJukebox(default_ipc_path(HOME))
 STATE = DEFAULT_STATE.copy()
@@ -184,6 +185,9 @@ def passwords_match(candidate: str, expected: str) -> bool:
 
 
 def session_token(headers: object) -> str:
+    session_header = str(getattr(headers, "get", lambda *_: "")("X-Jukebox-Session", "") or "").strip()
+    if session_header:
+        return session_header
     raw = str(getattr(headers, "get", lambda *_: "")("Cookie", "") or "")
     if not raw:
         return ""
@@ -263,8 +267,60 @@ def login_gate(error: bool = False) -> str:
 :root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#05050a;color:#f7f4ff;font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px}}
 .gate{{width:min(420px,100%);border:1px solid #27202f;border-radius:16px;background:#0d0a12;padding:32px;box-shadow:0 24px 80px rgba(0,0,0,.5)}}
 .mark{{display:flex;gap:7px;align-items:center;height:42px;margin-bottom:24px}}.mark i{{display:block;width:7px;border-radius:7px}}.mark i:nth-child(1){{height:18px;background:#fbbf24}}.mark i:nth-child(2){{height:34px;background:#fb923c}}.mark i:nth-child(3){{height:42px;background:#f43f5e}}.mark i:nth-child(4){{height:28px;background:#e879f9}}.mark i:nth-child(5){{height:14px;background:#c084fc}}
-h1{{font:700 30px/1.1 Sora,Manrope,sans-serif;margin:0 0 8px}}p{{margin:0 0 24px;color:#aaa1b5;line-height:1.5}}label{{display:block;font-size:13px;font-weight:700;margin-bottom:8px}}input{{width:100%;height:46px;border:1px solid #332b3d;border-radius:8px;background:#08070b;color:#fff;padding:0 13px;font:inherit;outline:none}}input:focus{{border-color:#a78bfa;box-shadow:0 0 0 3px rgba(167,139,250,.15)}}button{{width:100%;height:44px;margin-top:14px;border:0;border-radius:8px;background:#a78bfa;color:#100b18;font:800 14px Manrope,sans-serif;cursor:pointer}}.error{{color:#fb7185;margin:-8px 0 18px;font-size:13px}}
-</style></head><body><main class="gate"><div class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h1>Unlock Jukebox</h1><p>This Jukebox is protected by its server-side password.</p>{error_markup}<form method="post" action="/auth/login"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Unlock</button></form></main></body></html>"""
+h1{{font:700 30px/1.1 Sora,Manrope,sans-serif;margin:0 0 8px}}p{{margin:0 0 24px;color:#aaa1b5;line-height:1.5}}label{{display:block;font-size:13px;font-weight:700;margin-bottom:8px}}input{{width:100%;height:46px;border:1px solid #332b3d;border-radius:8px;background:#08070b;color:#fff;padding:0 13px;font-size:16px;outline:none}}input:focus{{border-color:#a78bfa;box-shadow:0 0 0 3px rgba(167,139,250,.15)}}button{{width:100%;height:44px;margin-top:14px;border:0;border-radius:8px;background:#a78bfa;color:#100b18;font:800 14px Manrope,sans-serif;cursor:pointer}}button:disabled{{opacity:.6;cursor:wait}}.error{{color:#fb7185;margin:-8px 0 18px;font-size:13px}}
+</style></head><body><main class="gate"><div class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h1>Unlock Jukebox</h1><p>This Jukebox is protected by its server-side password.</p>{error_markup}<p class="error" id="loginStatus" aria-live="polite"></p><form method="post" action="/auth/login" id="loginForm"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Unlock</button></form></main><script>
+(() => {{
+  const storageKey = "jukebox.browser-session.v1";
+  const form = document.getElementById("loginForm");
+  const password = document.getElementById("password");
+  const button = form.querySelector("button");
+  const status = document.getElementById("loginStatus");
+  const saved = (() => {{ try {{ return localStorage.getItem(storageKey) || ""; }} catch {{ return ""; }} }})();
+  const exchange = (path, body) => fetch(path, {{ method: "POST", credentials: "include", headers: {{ "Content-Type": "application/json" }}, body: JSON.stringify(body) }});
+  const installCookie = token => {{
+    const secure = location.protocol === "https:";
+    const policy = secure ? "; SameSite=None; Secure; Partitioned" : "; SameSite=Lax";
+    document.cookie = `jukebox_session=${{token}}; Path=/; Max-Age=${{180 * 24 * 60 * 60}}${{policy}}`;
+  }};
+  const confirmSession = token => fetch("/api/status", {{ credentials: "include", cache: "no-store", headers: {{ "X-Jukebox-Session": token }} }}).then(response => {{ if (!response.ok) throw new Error("session rejected"); }});
+  if (saved) {{
+    button.disabled = true;
+    status.textContent = "Restoring your session…";
+    installCookie(saved);
+    exchange("/auth/session", {{ session: saved }}).then(response => {{
+      if (!response.ok) throw new Error("expired");
+      installCookie(saved);
+      return confirmSession(saved);
+    }}).then(() => location.replace("/app")).catch(() => {{
+      try {{ localStorage.removeItem(storageKey); }} catch {{}}
+      button.disabled = false;
+      status.textContent = "Your saved session expired. Enter the password again.";
+      password.focus();
+    }});
+  }}
+  form.addEventListener("submit", async event => {{
+    event.preventDefault();
+    button.disabled = true;
+    status.textContent = "Unlocking…";
+    try {{
+      const response = await exchange("/auth/login", {{ password: password.value }});
+      password.value = "";
+      if (!response.ok) throw new Error("rejected");
+      const payload = await response.json();
+      if (!payload.session) throw new Error("missing session");
+      installCookie(payload.session);
+      await confirmSession(payload.session);
+      localStorage.setItem(storageKey, payload.session);
+      location.replace("/app");
+    }} catch {{
+      password.value = "";
+      button.disabled = false;
+      status.textContent = "That password was not accepted.";
+      password.focus();
+    }}
+  }});
+}})();
+</script></body></html>"""
 
 
 def slugify(value: str, fallback: str = "playlist") -> str:
@@ -770,14 +826,14 @@ def audio_metadata(path: Path) -> dict[str, str]:
 
 def invalidate_library_cache() -> None:
     global LIBRARY_CACHE, LIBRARY_CACHE_EXPIRES
-    with LOCK:
+    with CACHE_LOCK:
         LIBRARY_CACHE = None
         LIBRARY_CACHE_EXPIRES = 0.0
 
 
 def invalidate_storage_cache() -> None:
     global STORAGE_CACHE, STORAGE_CACHE_EXPIRES
-    with LOCK:
+    with CACHE_LOCK:
         STORAGE_CACHE = None
         STORAGE_CACHE_EXPIRES = 0.0
 
@@ -785,7 +841,7 @@ def invalidate_storage_cache() -> None:
 def scan_library(force: bool = False) -> list[dict[str, object]]:
     global LIBRARY_CACHE, LIBRARY_CACHE_EXPIRES
     now = time.monotonic()
-    with LOCK:
+    with CACHE_LOCK:
         if not force and LIBRARY_CACHE is not None and now < LIBRARY_CACHE_EXPIRES:
             return [track.copy() for track in LIBRARY_CACHE]
 
@@ -826,7 +882,7 @@ def scan_library(force: bool = False) -> list[dict[str, object]]:
                 "album_cover_lcd_path": cover_lcd_path,
             }
         )
-    with LOCK:
+    with CACHE_LOCK:
         LIBRARY_CACHE = [track.copy() for track in tracks]
         LIBRARY_CACHE_EXPIRES = time.monotonic() + LIBRARY_CACHE_TTL
     return tracks
@@ -925,7 +981,7 @@ def storage_payload(force: bool = False) -> dict[str, object]:
     global STORAGE_CACHE, STORAGE_CACHE_EXPIRES
     total, used, free = shutil.disk_usage(HOME)
     now = time.monotonic()
-    with LOCK:
+    with CACHE_LOCK:
         if not force and STORAGE_CACHE is not None and now < STORAGE_CACHE_EXPIRES:
             cached = STORAGE_CACHE.copy()
             cached.update({"total": total, "used": used, "free": free})
@@ -938,7 +994,7 @@ def storage_payload(force: bool = False) -> dict[str, object]:
         "free": free,
     }
     if not force and os.environ.get("JUKEBOX_FAST_STORAGE", "1") != "0":
-        with LOCK:
+        with CACHE_LOCK:
             if STORAGE_CACHE is None:
                 return {**base, "jukebox": 0, "library": 0, "playlists": 0, "assets": 0}
             cached = STORAGE_CACHE.copy()
@@ -952,7 +1008,7 @@ def storage_payload(force: bool = False) -> dict[str, object]:
         "playlists": directory_size(PLAYLIST_DIR),
         "assets": directory_size(ASSETS_DIR),
     }
-    with LOCK:
+    with CACHE_LOCK:
         STORAGE_CACHE = payload.copy()
         STORAGE_CACHE_EXPIRES = time.monotonic() + STORAGE_CACHE_TTL
     return payload
@@ -2208,6 +2264,11 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         return True
 
+    def browser_session_cookie(self, token: str) -> str:
+        forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().casefold()
+        cookie_policy = "; SameSite=None; Secure; Partitioned" if forwarded_proto == "https" else "; SameSite=Lax"
+        return f"{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_TTL_SECONDS}; HttpOnly; Priority=High{cookie_policy}"
+
     def handle_login(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > 8192:
@@ -2240,13 +2301,28 @@ class Handler(BaseHTTPRequestHandler):
         with AUTH_LOCK:
             AUTH_FAILURES.pop(address, None)
         token = create_browser_session(expected)
-        forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().casefold()
-        cookie_policy = "; SameSite=None; Secure; Partitioned" if forwarded_proto == "https" else "; SameSite=Lax"
+        cookie = self.browser_session_cookie(token)
+        if content_type.startswith("application/json"):
+            self.send_json({"ok": True, "session": token}, headers={"Set-Cookie": cookie, "Cache-Control": "no-store"})
+            return
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", "/")
-        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_TTL_SECONDS}; HttpOnly{cookie_policy}")
+        self.send_header("Set-Cookie", cookie)
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def handle_session_resume(self) -> None:
+        try:
+            body = self.read_json()
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            self.send_unauthorized()
+            return
+        token = str(body.get("session", ""))
+        password = configured_password()
+        if not session_is_valid(token, password):
+            self.send_unauthorized()
+            return
+        self.send_json({"ok": True}, headers={"Set-Cookie": self.browser_session_cookie(token), "Cache-Control": "no-store"})
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -2265,6 +2341,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+                return
+            if path == "/app":
+                self.send_html(manage_page())
                 return
             api_v1 = path.startswith("/api/v1/") or path in {"/api/v1", "/api/agent/bootstrap"}
             html_route = path in {"/", "/manage", "/mini-sym"}
@@ -2327,6 +2406,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/auth/login":
                 self.handle_login()
+                return
+            if path == "/auth/session":
+                self.handle_session_resume()
                 return
             api_v1 = path.startswith("/api/v1/") or path in {"/api/v1", "/mcp", "/api/agent/bootstrap"}
             if not self.require_access(path, api_v1=api_v1):

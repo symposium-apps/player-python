@@ -2908,6 +2908,17 @@
 </main>
 
 <script>
+const BROWSER_SESSION_STORAGE_KEY = "jukebox.browser-session.v1";
+const browserSession = (() => {
+  try { return localStorage.getItem(BROWSER_SESSION_STORAGE_KEY) || ""; } catch (_) { return ""; }
+})();
+if (browserSession) {
+  const policy = location.protocol === "https:" ? "; SameSite=None; Secure; Partitioned" : "; SameSite=Lax";
+  document.cookie = `jukebox_session=${browserSession}; Path=/; Max-Age=${180 * 24 * 60 * 60}${policy}`;
+} else {
+  location.replace("/");
+}
+
 const state = {
   status: null,
   tracks: [],
@@ -2975,10 +2986,20 @@ function qs(id) {
 }
 
 async function api(path, options = {}) {
+  const headers = {
+    ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+    ...(options.headers || {})
+  };
+  if (browserSession) headers["X-Jukebox-Session"] = browserSession;
   const response = await fetch(path, {
-    headers: options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
-    ...options
+    ...options,
+    headers
   });
+  if (response.status === 401 && browserSession) {
+    try { localStorage.removeItem(BROWSER_SESSION_STORAGE_KEY); } catch (_) {}
+    location.replace("/");
+    throw new Error("Your saved session expired.");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
   return data;

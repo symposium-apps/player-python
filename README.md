@@ -42,7 +42,7 @@ Create `UserData/Jukebox API/password.txt` and put only the desired password in 
 
 The password is read directly from UserData, is never displayed in the Jukebox UI, and is never returned by an endpoint. Delete or empty the file to disable the browser gate. With no configured password, the normal browser app remains open, but `/api/v1`, `/api/agent/bootstrap`, and `/mcp` return the same `401 Unauthorized` response as an incorrect password.
 
-After a successful browser login, Jukebox stores a signed persistent session in a secure `HttpOnly` cookie—not the password in browser storage. The session survives reloads, browser relaunches, and managed app restarts; changing the UserData password invalidates it. HTTPS sessions use a partitioned cross-site cookie so the SYM-OS embedded app viewer can remember its own login safely.
+After a successful browser login, Jukebox stores a signed persistent session in a secure `HttpOnly` cookie—not the password in browser storage. For embedded browsers that discard third-party cookies between launches, Jukebox also stores only the signed, revocable browser-session proof in local storage and silently exchanges it for a fresh `HttpOnly` cookie. The configured password is never written to local storage. Sessions survive reloads, browser relaunches, and managed app restarts; changing the UserData password invalidates them. HTTPS sessions use a partitioned cross-site cookie so the SYM-OS embedded app viewer can remember its own login safely.
 
 Remote requests authenticate with:
 
