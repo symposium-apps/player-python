@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
@@ -250,6 +251,34 @@ class StartupCompatibilityTest(unittest.TestCase):
                 server.SESSION_SECRET_CACHE = None
                 self.assertTrue(server.session_is_valid(token, PASSWORD))
                 self.assertFalse(server.session_is_valid(token, "changed-password"))
+
+    def test_browser_login_does_not_wait_for_playback_lock(self) -> None:
+        from jukebox import server
+
+        playback_locked = threading.Event()
+        release_playback = threading.Event()
+        session_created = threading.Event()
+
+        def hold_playback_lock() -> None:
+            with server.LOCK:
+                playback_locked.set()
+                release_playback.wait(timeout=5)
+
+        def create_session() -> None:
+            server.create_browser_session(PASSWORD)
+            session_created.set()
+
+        holder = threading.Thread(target=hold_playback_lock, daemon=True)
+        creator = threading.Thread(target=create_session, daemon=True)
+        holder.start()
+        self.assertTrue(playback_locked.wait(timeout=1))
+        creator.start()
+        try:
+            self.assertTrue(session_created.wait(timeout=1), "browser login blocked on the unrelated playback lock")
+        finally:
+            release_playback.set()
+            holder.join(timeout=2)
+            creator.join(timeout=2)
 
     def test_embedded_tags_and_artwork_are_extracted(self) -> None:
         from mutagen.id3 import APIC, TALB, TIT2, TPE1  # type: ignore[import-not-found]

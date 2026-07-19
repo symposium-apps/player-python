@@ -81,6 +81,7 @@ BROWSER_ICON_PATHS = {
 }
 
 LOCK = threading.RLock()
+AUTH_LOCK = threading.RLock()
 DISPLAY_LOCK = threading.RLock()
 JUKEBOX = MpvJukebox(default_ipc_path(HOME))
 STATE = DEFAULT_STATE.copy()
@@ -216,7 +217,7 @@ def request_is_authenticated(headers: object) -> bool:
 
 def browser_session_secret() -> bytes:
     global SESSION_SECRET_CACHE
-    with LOCK:
+    with AUTH_LOCK:
         if SESSION_SECRET_CACHE:
             return SESSION_SECRET_CACHE
         try:
@@ -2225,18 +2226,18 @@ class Handler(BaseHTTPRequestHandler):
         expected = configured_password()
         address = str(self.client_address[0])
         now = time.time()
-        with LOCK:
+        with AUTH_LOCK:
             attempts = [stamp for stamp in AUTH_FAILURES.get(address, []) if stamp > now - 300]
             AUTH_FAILURES[address] = attempts
         if len(attempts) >= 10:
             self.send_html(login_gate(True), HTTPStatus.TOO_MANY_REQUESTS)
             return
         if not passwords_match(candidate, expected):
-            with LOCK:
+            with AUTH_LOCK:
                 AUTH_FAILURES.setdefault(address, []).append(now)
             self.send_html(login_gate(True), HTTPStatus.UNAUTHORIZED)
             return
-        with LOCK:
+        with AUTH_LOCK:
             AUTH_FAILURES.pop(address, None)
         token = create_browser_session(expected)
         forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().casefold()
