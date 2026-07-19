@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import ExitStack
 import hashlib
 import http.client
 import json
@@ -14,6 +15,7 @@ import unittest
 import urllib.parse
 import wave
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,6 +197,29 @@ class ManagementApiTest(unittest.TestCase):
         self.assertEqual(self.json_request("GET", "/api/v1/tracks", password=PASSWORD)[2]["data"], [])
         self.assertFalse(list((self.user_data / "Music").rglob("*.wav")))
         self.assertFalse(list((self.user_data / "Music").rglob("*.png")))
+
+
+class StartupCompatibilityTest(unittest.TestCase):
+    def test_unwritable_api_readme_does_not_crash_startup(self) -> None:
+        from jukebox import server
+
+        with tempfile.TemporaryDirectory(prefix="jukebox-startup-test-") as temporary:
+            root = Path(temporary)
+            api_dir = root / "UserData" / "Jukebox API"
+            replacements = {
+                "LIBRARY_DIR": root / "UserData" / "Music",
+                "PLAYLIST_DIR": root / "UserData" / "Playlists",
+                "ASSETS_DIR": root / "UserData" / "Artwork",
+                "API_CONFIG_DIR": api_dir,
+                "API_README_FILE": api_dir / "README.txt",
+            }
+            with ExitStack() as stack:
+                for name, value in replacements.items():
+                    stack.enter_context(mock.patch.object(server, name, value))
+                stack.enter_context(mock.patch.object(Path, "write_text", side_effect=PermissionError("read-only UserData child")))
+                server.ensure_dirs()
+            self.assertTrue(api_dir.is_dir())
+            self.assertFalse((api_dir / "README.txt").exists())
 
 
 if __name__ == "__main__":

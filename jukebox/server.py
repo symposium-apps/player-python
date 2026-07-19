@@ -120,23 +120,26 @@ def ensure_dirs() -> None:
     except OSError:
         pass
     if not API_README_FILE.exists():
-        API_README_FILE.write_text(
-            "Jukebox remote access\n"
-            "=====================\n\n"
-            "To enable the remote REST API, MCP, and the browser password gate, create\n"
-            "password.txt in this directory. Put only the password in that file.\n\n"
-            "If password.txt is absent or empty, the browser app remains open but every\n"
-            "remote API and MCP request returns the same 401 Unauthorized response as an\n"
-            "incorrect password. The password is never displayed by Jukebox.\n\n"
-            "Authenticate remote requests with:\n"
-            "  Authorization: Bearer ***\n\n"
-            "Delete or empty password.txt to disable the browser gate. Doing so also\n"
-            "disables all remote API and MCP access.\n",
-            encoding="utf-8",
-        )
         try:
+            API_README_FILE.write_text(
+                "Jukebox remote access\n"
+                "=====================\n\n"
+                "To enable the remote REST API, MCP, and the browser password gate, create\n"
+                "password.txt in this directory. Put only the password in that file.\n\n"
+                "If password.txt is absent or empty, the browser app remains open but every\n"
+                "remote API and MCP request returns the same 401 Unauthorized response as an\n"
+                "incorrect password. The password is never displayed by Jukebox.\n\n"
+                "Authenticate remote requests with:\n"
+                "  Authorization: Bearer <password>\n\n"
+                "Delete or empty password.txt to disable the browser gate. Doing so also\n"
+                "disables all remote API and MCP access.\n",
+                encoding="utf-8",
+            )
             API_README_FILE.chmod(0o600)
         except OSError:
+            # A stale managed install may contain pre-created root-owned UserData
+            # children. Keep the browser app available while the platform repairs
+            # ownership; API access remains safely disabled without password.txt.
             pass
 
 
