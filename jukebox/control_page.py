@@ -7,7 +7,7 @@ HTML = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Jukebox</title>
-  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32x32.png?v=20260720-1" type="image/png" sizes="32x32"><link rel="shortcut icon" href="/favicon.ico?v=20260720-1"><link rel="apple-touch-icon" href="/apple-touch-icon.png?v=20260720-1" sizes="180x180">
   <style>
     :root {
       color-scheme: dark;
