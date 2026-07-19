@@ -4,16 +4,20 @@ import argparse
 import colorsys
 import hashlib
 import html
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
+import uuid
 from math import ceil, sqrt
 from email import policy
 from email.parser import BytesParser
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,6 +63,13 @@ USER_DATA = Path(os.environ.get("SYM_APP_USER_DATA_DIR", HOME)).resolve()
 LIBRARY_DIR = Path(os.environ.get("JUKEBOX_LIBRARY", USER_DATA / "Music")).resolve()
 PLAYLIST_DIR = Path(os.environ.get("JUKEBOX_PLAYLISTS", USER_DATA / "Playlists")).resolve()
 ASSETS_DIR = Path(os.environ.get("JUKEBOX_ASSETS", USER_DATA / "Artwork")).resolve()
+API_CONFIG_DIR = Path(os.environ.get("JUKEBOX_API_CONFIG_DIR", USER_DATA / "Jukebox API")).resolve()
+PASSWORD_FILE = Path(os.environ.get("JUKEBOX_PASSWORD_FILE", API_CONFIG_DIR / "password.txt")).resolve()
+API_README_FILE = API_CONFIG_DIR / "README.txt"
+API_MAX_UPLOAD_BYTES = int(os.environ.get("JUKEBOX_API_MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 * 1024)))
+USER_DATA_QUOTA_BYTES = int(os.environ.get("JUKEBOX_USER_DATA_QUOTA_BYTES", str(50 * 1024 * 1024 * 1024)))
+SESSION_COOKIE = "jukebox_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
 
 LOCK = threading.RLock()
 DISPLAY_LOCK = threading.RLock()
@@ -75,6 +86,8 @@ LIBRARY_CACHE_TTL = 3600.0
 STORAGE_CACHE: dict[str, object] | None = None
 STORAGE_CACHE_EXPIRES = 0.0
 STORAGE_CACHE_TTL = 3600.0
+AUTH_SESSIONS: dict[str, tuple[float, str]] = {}
+AUTH_FAILURES: dict[str, list[float]] = {}
 HOME_FOCUS_ACTIONS = {
     0: "menu",
     1: "previous",
@@ -101,6 +114,111 @@ def ensure_dirs() -> None:
     LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
     PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    API_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        API_CONFIG_DIR.chmod(0o700)
+    except OSError:
+        pass
+    if not API_README_FILE.exists():
+        API_README_FILE.write_text(
+            "Jukebox remote access\n"
+            "=====================\n\n"
+            "To enable the remote REST API, MCP, and the browser password gate, create\n"
+            "password.txt in this directory. Put only the password in that file.\n\n"
+            "If password.txt is absent or empty, the browser app remains open but every\n"
+            "remote API and MCP request returns the same 401 Unauthorized response as an\n"
+            "incorrect password. The password is never displayed by Jukebox.\n\n"
+            "Authenticate remote requests with:\n"
+            "  Authorization: Bearer ***\n\n"
+            "Delete or empty password.txt to disable the browser gate. Doing so also\n"
+            "disables all remote API and MCP access.\n",
+            encoding="utf-8",
+        )
+        try:
+            API_README_FILE.chmod(0o600)
+        except OSError:
+            pass
+
+
+def configured_password() -> str:
+    try:
+        PASSWORD_FILE.chmod(0o600)
+    except OSError:
+        pass
+    try:
+        value = PASSWORD_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return value[:4096]
+
+
+def password_fingerprint(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def bearer_password(headers: object) -> str:
+    authorization = str(getattr(headers, "get", lambda *_: "")("Authorization", "") or "")
+    scheme, separator, value = authorization.partition(" ")
+    if separator and scheme.casefold() == "bearer":
+        return value.strip()
+    return ""
+
+
+def passwords_match(candidate: str, expected: str) -> bool:
+    if not candidate or not expected:
+        return False
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
+
+def session_token(headers: object) -> str:
+    raw = str(getattr(headers, "get", lambda *_: "")("Cookie", "") or "")
+    if not raw:
+        return ""
+    try:
+        cookie = SimpleCookie(raw)
+        morsel = cookie.get(SESSION_COOKIE)
+        return morsel.value if morsel else ""
+    except Exception:
+        return ""
+
+
+def session_is_valid(token: str, password: str) -> bool:
+    if not token or not password:
+        return False
+    now = time.time()
+    fingerprint = password_fingerprint(password)
+    with LOCK:
+        expired = [key for key, (expires, _) in AUTH_SESSIONS.items() if expires <= now]
+        for key in expired:
+            AUTH_SESSIONS.pop(key, None)
+        record = AUTH_SESSIONS.get(token)
+    return bool(record and record[0] > now and hmac.compare_digest(record[1], fingerprint))
+
+
+def request_is_authenticated(headers: object) -> bool:
+    password = configured_password()
+    if not password:
+        return False
+    return passwords_match(bearer_password(headers), password) or session_is_valid(session_token(headers), password)
+
+
+def create_browser_session(password: str) -> str:
+    token = secrets.token_urlsafe(32)
+    with LOCK:
+        AUTH_SESSIONS[token] = (time.time() + SESSION_TTL_SECONDS, password_fingerprint(password))
+    return token
+
+
+def login_gate(error: bool = False) -> str:
+    error_markup = '<p class="error">That password was not accepted.</p>' if error else ""
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Unlock Jukebox</title><style>
+:root{{color-scheme:dark}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#05050a;color:#f7f4ff;font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px}}
+.gate{{width:min(420px,100%);border:1px solid #27202f;border-radius:16px;background:#0d0a12;padding:32px;box-shadow:0 24px 80px rgba(0,0,0,.5)}}
+.mark{{display:flex;gap:7px;align-items:center;height:42px;margin-bottom:24px}}.mark i{{display:block;width:7px;border-radius:7px}}.mark i:nth-child(1){{height:18px;background:#fbbf24}}.mark i:nth-child(2){{height:34px;background:#fb923c}}.mark i:nth-child(3){{height:42px;background:#f43f5e}}.mark i:nth-child(4){{height:28px;background:#e879f9}}.mark i:nth-child(5){{height:14px;background:#c084fc}}
+h1{{font:700 30px/1.1 Sora,Manrope,sans-serif;margin:0 0 8px}}p{{margin:0 0 24px;color:#aaa1b5;line-height:1.5}}label{{display:block;font-size:13px;font-weight:700;margin-bottom:8px}}input{{width:100%;height:46px;border:1px solid #332b3d;border-radius:8px;background:#08070b;color:#fff;padding:0 13px;font:inherit;outline:none}}input:focus{{border-color:#a78bfa;box-shadow:0 0 0 3px rgba(167,139,250,.15)}}button{{width:100%;height:44px;margin-top:14px;border:0;border-radius:8px;background:#a78bfa;color:#100b18;font:800 14px Manrope,sans-serif;cursor:pointer}}.error{{color:#fb7185;margin:-8px 0 18px;font-size:13px}}
+</style></head><body><main class="gate"><div class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h1>Unlock Jukebox</h1><p>This Jukebox is protected by its server-side password.</p>{error_markup}<form method="post" action="/auth/login"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required><button type="submit">Unlock</button></form></main></body></html>"""
 
 
 def slugify(value: str, fallback: str = "playlist") -> str:
@@ -1759,25 +1877,227 @@ def upload_path(filename: str, target_album: str = "") -> Path:
 def manage_page() -> str:
     return Path(__file__).with_name("manage.html").read_text(encoding="utf-8")
 
+
+def api_receipt(action: str, data: object, changed: bool = False) -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": data,
+        "receipt": {"action": action, "changed": changed, "at": int(time.time())},
+    }
+
+
+def agent_bootstrap() -> dict[str, object]:
+    return {
+        "service": "Jukebox",
+        "version": __version__,
+        "api_version": "v1",
+        "rest_base": "/api/v1",
+        "mcp_path": "/mcp",
+        "authentication": {
+            "type": "bearer",
+            "header": "Authorization: Bearer <password>",
+            "password_file": "UserData/Jukebox API/password.txt",
+            "password_value_exposed": False,
+            "disabled_without_password": True,
+        },
+        "upload": {
+            "method": "PUT",
+            "path": "/api/v1/files/{relative-library-path}",
+            "supported_extensions": sorted(AUDIO_EXTENSIONS | IMAGE_EXTENSIONS),
+            "conflict_modes": ["error", "skip", "replace", "rename"],
+            "max_bytes": API_MAX_UPLOAD_BYTES,
+            "notes": "Stream raw file bytes with curl --upload-file. Upload artwork into the album folder, then rescan once after a batch.",
+        },
+    }
+
+
+def openapi_document() -> dict[str, object]:
+    security = [{"bearerAuth": []}]
+    return {
+        "openapi": "3.1.0",
+        "info": {"title": "Jukebox Management API", "version": __version__},
+        "servers": [{"url": "/"}],
+        "components": {
+            "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
+        },
+        "security": security,
+        "paths": {
+            "/api/v1/context": {"get": {"summary": "Get API capabilities"}},
+            "/api/v1/tracks": {"get": {"summary": "List tracks"}},
+            "/api/v1/tracks/{id}": {"get": {"summary": "Get a track"}, "delete": {"summary": "Delete a track"}},
+            "/api/v1/albums": {"get": {"summary": "List albums"}},
+            "/api/v1/albums/{slug}": {"get": {"summary": "Get an album"}, "delete": {"summary": "Delete an album"}},
+            "/api/v1/playlists": {"get": {"summary": "List playlists"}, "post": {"summary": "Create a playlist"}},
+            "/api/v1/playlists/{slug}": {"get": {"summary": "Get a playlist"}, "put": {"summary": "Replace a playlist"}, "delete": {"summary": "Delete a playlist"}},
+            "/api/v1/playlists/{slug}/tracks": {"post": {"summary": "Add tracks"}, "delete": {"summary": "Remove tracks"}},
+            "/api/v1/files/{relative-path}": {"put": {"summary": "Stream an audio or artwork file into the library"}},
+            "/api/v1/library/rescan": {"post": {"summary": "Rescan metadata and artwork after a batch upload"}},
+            "/mcp": {"post": {"summary": "MCP Streamable HTTP JSON-RPC endpoint"}},
+        },
+    }
+
+
+def playlist_or_error(slug: str) -> dict[str, object]:
+    playlist = playlist_by_slug(slugify(slug))
+    if not playlist:
+        raise KeyError(f"Playlist not found: {slug}")
+    return playlist
+
+
+def album_or_error(slug: str) -> dict[str, object]:
+    album = album_by_slug(slugify(slug, "album"))
+    if not album:
+        raise KeyError(f"Album not found: {slug}")
+    return album
+
+
+def replace_playlist(slug: str, name: str, track_ids: list[str]) -> dict[str, object]:
+    clean_slug = slugify(slug)
+    return {"ok": True, "playlist": write_m3u_playlist(name or clean_slug.replace("_", " "), clean_slug, track_ids)}
+
+
+def add_playlist_tracks(slug: str, track_ids: list[str]) -> dict[str, object]:
+    playlist = playlist_or_error(slug)
+    current = [str(item) for item in playlist.get("track_ids", [])]
+    for track_id in track_ids:
+        if track_id not in current:
+            current.append(track_id)
+    return replace_playlist(str(playlist["slug"]), str(playlist["name"]), current)
+
+
+def remove_playlist_tracks(slug: str, track_ids: list[str]) -> dict[str, object]:
+    playlist = playlist_or_error(slug)
+    removed = {str(item) for item in track_ids}
+    current = [str(item) for item in playlist.get("track_ids", []) if str(item) not in removed]
+    return replace_playlist(str(playlist["slug"]), str(playlist["name"]), current)
+
+
+def safe_upload_destination(relative_path: str) -> Path:
+    normalized = relative_path.replace("\\", "/").strip("/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts or any(part in {".", ".."} or "\x00" in part for part in parts):
+        raise ValueError("Invalid library path")
+    suffix = Path(parts[-1]).suffix.lower()
+    if suffix not in AUDIO_EXTENSIONS and suffix not in IMAGE_EXTENSIONS:
+        raise ValueError(f"Unsupported file: {suffix or 'no extension'}")
+    destination = (LIBRARY_DIR / Path(*parts)).resolve()
+    if not destination.is_relative_to(LIBRARY_DIR):
+        raise ValueError("Upload path escaped library")
+    current = LIBRARY_DIR
+    for part in parts:
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise ValueError("Symlink upload paths are not allowed")
+    return destination
+
+
+def renamed_destination(destination: Path) -> Path:
+    counter = 2
+    candidate = destination
+    while candidate.exists():
+        candidate = destination.with_name(f"{destination.stem}_{counter}{destination.suffix}")
+        counter += 1
+    return candidate
+
+
+def mcp_tools() -> list[dict[str, object]]:
+    object_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    slug_schema = {"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"], "additionalProperties": False}
+    track_schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"], "additionalProperties": False}
+    playlist_schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "track_ids": {"type": "array", "items": {"type": "string"}}},
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+    playlist_tracks_schema = {
+        "type": "object",
+        "properties": {"slug": {"type": "string"}, "track_ids": {"type": "array", "items": {"type": "string"}}},
+        "required": ["slug", "track_ids"],
+        "additionalProperties": False,
+    }
+    return [
+        {"name": "jukebox_get_context", "description": "Get authenticated Jukebox API and upload capabilities.", "inputSchema": object_schema},
+        {"name": "jukebox_list_tracks", "description": "List all indexed tracks.", "inputSchema": object_schema},
+        {"name": "jukebox_get_track", "description": "Get one indexed track.", "inputSchema": track_schema},
+        {"name": "jukebox_list_albums", "description": "List albums derived from the music library.", "inputSchema": object_schema},
+        {"name": "jukebox_get_album", "description": "Get an album and its tracks.", "inputSchema": slug_schema},
+        {"name": "jukebox_list_playlists", "description": "List playlists.", "inputSchema": object_schema},
+        {"name": "jukebox_get_playlist", "description": "Get one playlist.", "inputSchema": slug_schema},
+        {"name": "jukebox_create_playlist", "description": "Create or replace a playlist by name.", "inputSchema": playlist_schema},
+        {"name": "jukebox_add_playlist_tracks", "description": "Add track IDs to a playlist.", "inputSchema": playlist_tracks_schema},
+        {"name": "jukebox_remove_playlist_tracks", "description": "Remove track IDs from a playlist.", "inputSchema": playlist_tracks_schema},
+        {"name": "jukebox_delete_playlist", "description": "Delete a playlist.", "inputSchema": slug_schema},
+        {"name": "jukebox_delete_track", "description": "Delete one track and remove it from playlists.", "inputSchema": track_schema},
+        {"name": "jukebox_delete_album", "description": "Delete an album and its artwork.", "inputSchema": slug_schema},
+        {"name": "jukebox_rescan_library", "description": "Rescan uploaded audio and artwork once after a batch.", "inputSchema": object_schema},
+        {"name": "jukebox_get_upload_instructions", "description": "Get curl-oriented streaming upload instructions. Binary data is uploaded through REST, not MCP JSON.", "inputSchema": object_schema},
+    ]
+
+
+def call_mcp_tool(name: str, arguments: dict[str, object]) -> object:
+    if name in {"jukebox_get_context", "jukebox_get_upload_instructions"}:
+        return agent_bootstrap()
+    if name == "jukebox_list_tracks":
+        return scan_library()
+    if name == "jukebox_get_track":
+        track = tracks_by_id().get(str(arguments.get("id", "")))
+        if not track:
+            raise KeyError("Track not found")
+        return track
+    if name == "jukebox_list_albums":
+        return list_albums()
+    if name == "jukebox_get_album":
+        return album_or_error(str(arguments.get("slug", "")))
+    if name == "jukebox_list_playlists":
+        return list_playlists()
+    if name == "jukebox_get_playlist":
+        return playlist_or_error(str(arguments.get("slug", "")))
+    if name == "jukebox_create_playlist":
+        return save_playlist(str(arguments.get("name", "Playlist")), [str(item) for item in arguments.get("track_ids", []) if str(item)])
+    if name == "jukebox_add_playlist_tracks":
+        return add_playlist_tracks(str(arguments.get("slug", "")), [str(item) for item in arguments.get("track_ids", []) if str(item)])
+    if name == "jukebox_remove_playlist_tracks":
+        return remove_playlist_tracks(str(arguments.get("slug", "")), [str(item) for item in arguments.get("track_ids", []) if str(item)])
+    if name == "jukebox_delete_playlist":
+        return delete_playlists([str(arguments.get("slug", ""))])
+    if name == "jukebox_delete_track":
+        return delete_tracks([str(arguments.get("id", ""))])
+    if name == "jukebox_delete_album":
+        return delete_albums([str(arguments.get("slug", ""))])
+    if name == "jukebox_rescan_library":
+        invalidate_library_cache()
+        invalidate_storage_cache()
+        return {"tracks": scan_library(force=True), "albums": list_albums(), "playlists": list_playlists(), "storage": storage_payload(force=True)}
+    raise KeyError(f"Unknown MCP tool: {name}")
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"Jukebox/{__version__}"
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"[{self.log_date_time_string()}] {self.address_string()} {fmt % args}")
 
-    def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
-    def send_html(self, body: str) -> None:
+    def send_html(self, body: str, status: HTTPStatus = HTTPStatus.OK, headers: dict[str, str] | None = None) -> None:
         data = body.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -1785,50 +2105,175 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
             return {}
+        if length > 1024 * 1024:
+            raise ValueError("JSON request is too large")
         raw = self.rfile.read(length)
-        return json.loads(raw.decode("utf-8"))
+        decoded = json.loads(raw.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ValueError("Expected a JSON object")
+        return decoded
+
+    def send_unauthorized(self) -> None:
+        self.send_json(
+            {"ok": False, "error": "Unauthorized"},
+            HTTPStatus.UNAUTHORIZED,
+            {"WWW-Authenticate": 'Bearer realm="Jukebox"'},
+        )
+
+    def require_access(self, path: str, *, html_route: bool = False, api_v1: bool = False) -> bool:
+        password = configured_password()
+        if api_v1:
+            if not password or not request_is_authenticated(self.headers):
+                self.send_unauthorized()
+                return False
+            return True
+        if password and not request_is_authenticated(self.headers):
+            if html_route:
+                failed = parse_qs(urlparse(self.path).query).get("auth", [""])[0] == "failed"
+                self.send_html(login_gate(failed), HTTPStatus.UNAUTHORIZED)
+            else:
+                self.send_unauthorized()
+            return False
+        return True
+
+    def handle_login(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 8192:
+            self.send_html(login_gate(True), HTTPStatus.UNAUTHORIZED)
+            return
+        raw = self.rfile.read(length)
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.startswith("application/json"):
+            try:
+                body = json.loads(raw.decode("utf-8"))
+                candidate = str(body.get("password", "")) if isinstance(body, dict) else ""
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                candidate = ""
+        else:
+            candidate = parse_qs(raw.decode("utf-8", errors="replace")).get("password", [""])[0]
+        expected = configured_password()
+        address = str(self.client_address[0])
+        now = time.time()
+        with LOCK:
+            attempts = [stamp for stamp in AUTH_FAILURES.get(address, []) if stamp > now - 300]
+            AUTH_FAILURES[address] = attempts
+        if len(attempts) >= 10:
+            self.send_html(login_gate(True), HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        if not passwords_match(candidate, expected):
+            with LOCK:
+                AUTH_FAILURES.setdefault(address, []).append(now)
+            self.send_html(login_gate(True), HTTPStatus.UNAUTHORIZED)
+            return
+        with LOCK:
+            AUTH_FAILURES.pop(address, None)
+        token = create_browser_session(expected)
+        forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().casefold()
+        secure = "; Secure" if forwarded_proto == "https" else ""
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_TTL_SECONDS}; HttpOnly; SameSite=Strict{secure}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        path = parsed.path
         try:
-            if parsed.path == "/":
-                self.send_html(manage_page())
-            elif parsed.path == "/manage":
-                self.send_html(manage_page())
-            elif parsed.path == "/api/screen":
-                self.send_json(screen_payload())
-            elif parsed.path == "/api/status":
-                self.send_json(status_payload())
-            elif parsed.path == "/_sym/health":
+            if path == "/_sym/health":
                 self.send_json({"ok": True, "status": "healthy", "version": __version__})
-            elif parsed.path == "/mini-sym":
-                self.send_html(html_page())
-            elif parsed.path == "/api/reset":
-                self.send_json(reset_jukebox_state())
-            elif parsed.path == "/api/display/reinit":
-                self.send_json(reinitialize_display())
-            elif parsed.path == "/api/library":
-                self.send_json({"ok": True, "tracks": scan_library()})
-            elif parsed.path == "/api/playlists":
-                self.send_json({"ok": True, "playlists": list_playlists()})
-            elif parsed.path.startswith("/media/"):
-                self.serve_media(unquote(parsed.path.removeprefix("/media/")))
-            elif parsed.path.startswith("/library-art/"):
-                self.serve_library_art(unquote(parsed.path.removeprefix("/library-art/")))
-            elif parsed.path.startswith("/assets/"):
-                self.serve_asset(unquote(parsed.path.removeprefix("/assets/")))
-            elif parsed.path == "/favicon.ico":
+                return
+            if path == "/favicon.ico":
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self.end_headers()
+                return
+            api_v1 = path.startswith("/api/v1/") or path in {"/api/v1", "/api/agent/bootstrap"}
+            html_route = path in {"/", "/manage", "/mini-sym"}
+            if not self.require_access(path, html_route=html_route, api_v1=api_v1):
+                return
+            if path in {"/", "/manage"}:
+                self.send_html(manage_page())
+            elif path == "/mini-sym":
+                self.send_html(html_page())
+            elif path in {"/api/v1", "/api/v1/context", "/api/agent/bootstrap"}:
+                self.send_json(api_receipt("get_context", agent_bootstrap()))
+            elif path == "/api/v1/openapi.json":
+                self.send_json(openapi_document())
+            elif path == "/api/v1/storage":
+                self.send_json(api_receipt("get_storage", storage_payload(force=True)))
+            elif path == "/api/v1/tracks":
+                self.send_json(api_receipt("list_tracks", scan_library()))
+            elif path.startswith("/api/v1/tracks/"):
+                track_id = unquote(path.removeprefix("/api/v1/tracks/"))
+                track = tracks_by_id().get(track_id)
+                if not track:
+                    raise KeyError("Track not found")
+                self.send_json(api_receipt("get_track", track))
+            elif path == "/api/v1/albums":
+                self.send_json(api_receipt("list_albums", list_albums()))
+            elif path.startswith("/api/v1/albums/"):
+                self.send_json(api_receipt("get_album", album_or_error(unquote(path.removeprefix("/api/v1/albums/")))))
+            elif path == "/api/v1/playlists":
+                self.send_json(api_receipt("list_playlists", list_playlists()))
+            elif path.startswith("/api/v1/playlists/"):
+                self.send_json(api_receipt("get_playlist", playlist_or_error(unquote(path.removeprefix("/api/v1/playlists/")))))
+            elif path == "/api/screen":
+                self.send_json(screen_payload())
+            elif path == "/api/status":
+                self.send_json(status_payload())
+            elif path == "/api/reset":
+                self.send_json(reset_jukebox_state())
+            elif path == "/api/display/reinit":
+                self.send_json(reinitialize_display())
+            elif path == "/api/library":
+                self.send_json({"ok": True, "tracks": scan_library()})
+            elif path == "/api/playlists":
+                self.send_json({"ok": True, "playlists": list_playlists()})
+            elif path.startswith("/media/"):
+                self.serve_media(unquote(path.removeprefix("/media/")))
+            elif path.startswith("/library-art/"):
+                self.serve_library_art(unquote(path.removeprefix("/library-art/")))
+            elif path.startswith("/assets/"):
+                self.serve_asset(unquote(path.removeprefix("/assets/")))
             else:
                 self.send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except KeyError as exc:
+            self.send_json({"ok": False, "error": str(exc).strip("'")}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        path = parsed.path
         try:
-            if parsed.path == "/api/upload":
+            if path == "/auth/login":
+                self.handle_login()
+                return
+            api_v1 = path.startswith("/api/v1/") or path in {"/api/v1", "/mcp", "/api/agent/bootstrap"}
+            if not self.require_access(path, api_v1=api_v1):
+                return
+            if path == "/mcp":
+                self.handle_mcp()
+            elif path == "/api/v1/library/rescan":
+                invalidate_library_cache()
+                invalidate_storage_cache()
+                payload = {"tracks": scan_library(force=True), "albums": list_albums(), "playlists": list_playlists(), "storage": storage_payload(force=True)}
+                self.send_json(api_receipt("rescan_library", payload, True))
+            elif path == "/api/v1/playlists":
+                body = self.read_json()
+                name = str(body.get("name", "Playlist"))
+                track_ids = body.get("track_ids", [])
+                if not isinstance(track_ids, list):
+                    raise ValueError("track_ids must be an array")
+                self.send_json(api_receipt("create_playlist", save_playlist(name, [str(item) for item in track_ids]), True), HTTPStatus.CREATED)
+            elif path.startswith("/api/v1/playlists/") and path.endswith("/tracks"):
+                slug = unquote(path.removeprefix("/api/v1/playlists/").removesuffix("/tracks").rstrip("/"))
+                body = self.read_json()
+                track_ids = body.get("track_ids", [])
+                if not isinstance(track_ids, list):
+                    raise ValueError("track_ids must be an array")
+                self.send_json(api_receipt("add_playlist_tracks", add_playlist_tracks(slug, [str(item) for item in track_ids]), True))
+            elif path == "/api/upload":
                 self.handle_upload()
             elif parsed.path == "/api/display/reinit":
                 self.send_json(reinitialize_display())
@@ -1901,8 +2346,191 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.play_playlist(slug))
             else:
                 self.send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except KeyError as exc:
+            self.send_json({"ok": False, "error": str(exc).strip("'")}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            if not self.require_access(path, api_v1=True):
+                return
+            if path.startswith("/api/v1/files/"):
+                relative_path = unquote(path.removeprefix("/api/v1/files/"))
+                self.handle_stream_upload(relative_path, parse_qs(parsed.query))
+            elif path.startswith("/api/v1/playlists/") and not path.endswith("/tracks"):
+                slug = unquote(path.removeprefix("/api/v1/playlists/"))
+                body = self.read_json()
+                track_ids = body.get("track_ids", [])
+                if not isinstance(track_ids, list):
+                    raise ValueError("track_ids must be an array")
+                existing = playlist_by_slug(slugify(slug))
+                name = str(body.get("name") or (existing or {}).get("name") or slug.replace("_", " "))
+                self.send_json(api_receipt("replace_playlist", replace_playlist(slug, name, [str(item) for item in track_ids]), True))
+            else:
+                self.send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except KeyError as exc:
+            self.send_json({"ok": False, "error": str(exc).strip("'")}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            if not self.require_access(path, api_v1=True):
+                return
+            if path.startswith("/api/v1/playlists/") and path.endswith("/tracks"):
+                slug = unquote(path.removeprefix("/api/v1/playlists/").removesuffix("/tracks").rstrip("/"))
+                body = self.read_json()
+                track_ids = body.get("track_ids", [])
+                if not isinstance(track_ids, list):
+                    raise ValueError("track_ids must be an array")
+                self.send_json(api_receipt("remove_playlist_tracks", remove_playlist_tracks(slug, [str(item) for item in track_ids]), True))
+            elif path.startswith("/api/v1/playlists/"):
+                slug = unquote(path.removeprefix("/api/v1/playlists/"))
+                playlist_or_error(slug)
+                self.send_json(api_receipt("delete_playlist", delete_playlists([slug]), True))
+            elif path.startswith("/api/v1/tracks/"):
+                track_id = unquote(path.removeprefix("/api/v1/tracks/"))
+                if track_id not in tracks_by_id():
+                    raise KeyError("Track not found")
+                self.send_json(api_receipt("delete_track", delete_tracks([track_id]), True))
+            elif path.startswith("/api/v1/albums/"):
+                slug = unquote(path.removeprefix("/api/v1/albums/"))
+                album_or_error(slug)
+                self.send_json(api_receipt("delete_album", delete_albums([slug]), True))
+            else:
+                self.send_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except KeyError as exc:
+            self.send_json({"ok": False, "error": str(exc).strip("'")}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def handle_mcp(self) -> None:
+        message = self.read_json()
+        request_id = message.get("id")
+        method = str(message.get("method", ""))
+        if method == "notifications/initialized":
+            self.send_response(HTTPStatus.ACCEPTED)
+            self.end_headers()
+            return
+        try:
+            if method == "initialize":
+                result: object = {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": "jukebox", "version": __version__},
+                    "instructions": "Use MCP for library discovery and management. Upload binary audio/artwork through the authenticated streaming REST endpoint returned by jukebox_get_upload_instructions.",
+                }
+            elif method == "ping":
+                result = {}
+            elif method == "tools/list":
+                result = {"tools": mcp_tools()}
+            elif method == "tools/call":
+                params = message.get("params", {})
+                if not isinstance(params, dict):
+                    raise ValueError("MCP params must be an object")
+                name = str(params.get("name", ""))
+                arguments = params.get("arguments", {})
+                if not isinstance(arguments, dict):
+                    raise ValueError("MCP arguments must be an object")
+                data = call_mcp_tool(name, arguments)
+                result = {
+                    "content": [{"type": "text", "text": json.dumps(data)}],
+                    "structuredContent": data,
+                    "isError": False,
+                }
+            else:
+                raise KeyError(f"Unknown MCP method: {method}")
+            self.send_json({"jsonrpc": "2.0", "id": request_id, "result": result})
+        except Exception as exc:
+            self.send_json({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [{"type": "text", "text": str(exc).strip("'")}],
+                    "isError": True,
+                },
+            })
+
+    def handle_stream_upload(self, relative_path: str, query: dict[str, list[str]]) -> None:
+        ensure_dirs()
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            self.send_json({"ok": False, "error": "Content-Length is required"}, HTTPStatus.LENGTH_REQUIRED)
+            return
+        if length > API_MAX_UPLOAD_BYTES:
+            self.send_json({"ok": False, "error": "Upload exceeds the configured per-file limit"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        destination = safe_upload_destination(relative_path)
+        conflict = (query.get("conflict") or ["error"])[0].casefold()
+        if conflict not in {"error", "skip", "replace", "rename"}:
+            raise ValueError("conflict must be error, skip, replace, or rename")
+        if destination.exists():
+            if not destination.is_file() or destination.is_symlink():
+                raise ValueError("Upload destination is not a regular file")
+            if conflict == "error":
+                self.close_connection = True
+                self.send_json({"ok": False, "error": "File already exists"}, HTTPStatus.CONFLICT)
+                return
+            if conflict == "skip":
+                self.close_connection = True
+                self.send_json(api_receipt("upload_file", {"relative_path": destination.relative_to(LIBRARY_DIR).as_posix(), "skipped": True}))
+                return
+            if conflict == "rename":
+                destination = renamed_destination(destination)
+        existing_size = destination.stat().st_size if destination.exists() and conflict == "replace" else 0
+        current_size = directory_size(USER_DATA)
+        if current_size - existing_size + length > USER_DATA_QUOTA_BYTES:
+            self.send_json({"ok": False, "error": "UserData quota would be exceeded"}, HTTPStatus.INSUFFICIENT_STORAGE)
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = destination.parent / f".jukebox-upload-{uuid.uuid4().hex}.tmp"
+        digest = hashlib.sha256()
+        remaining = length
+        try:
+            with temp_path.open("xb") as output:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("Upload ended before Content-Length bytes were received")
+                    output.write(chunk)
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            expected_checksum = self.headers.get("X-Content-SHA256", "").strip().casefold()
+            checksum = digest.hexdigest()
+            if expected_checksum and not hmac.compare_digest(expected_checksum, checksum):
+                raise ValueError("SHA-256 checksum did not match")
+            os.replace(temp_path, destination)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+        invalidate_library_cache()
+        invalidate_storage_cache()
+        should_rescan = (query.get("rescan") or ["false"])[0].casefold() in {"1", "true", "yes"}
+        data: dict[str, object] = {
+            "relative_path": destination.relative_to(LIBRARY_DIR).as_posix(),
+            "filename": destination.name,
+            "size": length,
+            "sha256": digest.hexdigest(),
+            "kind": "audio" if destination.suffix.lower() in AUDIO_EXTENSIONS else "artwork",
+        }
+        if destination.suffix.lower() in AUDIO_EXTENSIONS:
+            data["track_id"] = track_id_for(destination)
+        if should_rescan:
+            data["tracks"] = scan_library(force=True)
+            data["albums"] = list_albums()
+        self.send_json(api_receipt("upload_file", data, True), HTTPStatus.CREATED)
 
     def handle_upload(self) -> None:
         ensure_dirs()

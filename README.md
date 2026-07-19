@@ -17,24 +17,94 @@ Jukebox accepts MP3, M4A, AAC, OGG, WAV, and FLAC audio. Album artwork can be up
 
 ## App-owned storage
 
-Jukebox keeps uploaded music and runtime state inside its own app folder:
+SYM-Node provides a profile/app-scoped `UserData` directory. Jukebox consumes the platform paths supplied through `SYM_APP_USER_DATA_DIR` and `SYM_APP_STATE_DIR`; it does not require the immutable App Store release to be writable.
+
+The visible data layout is:
 
 ```text
-$HOME/project_files/Apps/jukebox/.sym-data/
+UserData/
+├── Music/          # Uploaded audio and album-folder artwork
+├── Playlists/      # M3U8 playlists
+├── Artwork/        # Generated/runtime artwork
+└── Jukebox API/
+    ├── README.txt
+    └── password.txt  # Optional; user-created and never shown by Jukebox
 ```
 
-The managed data layout is:
+Legacy `.sym-data` installations are declared for migration into UserData. UserData remains profile scoped and is preserved independently of managed release updates.
+
+## Optional server password and remote access
+
+Create `UserData/Jukebox API/password.txt` and put only the desired password in the file to enable both:
+
+- the server-side browser password gate for `/`, `/manage`, `/mini-sym`, media, artwork, and the browser API;
+- authenticated remote REST and MCP management.
+
+The password is read directly from UserData, is never displayed in the Jukebox UI, and is never returned by an endpoint. Delete or empty the file to disable the browser gate. With no configured password, the normal browser app remains open, but `/api/v1`, `/api/agent/bootstrap`, and `/mcp` return the same `401 Unauthorized` response as an incorrect password.
+
+Remote requests authenticate with:
+
+```http
+Authorization: Bearer <password>
+```
+
+Do not put the password in a URL or query string.
+
+## Remote REST API
+
+The canonical management API is rooted at `/api/v1`. Its OpenAPI description is available to authenticated callers at `/api/v1/openapi.json`.
+
+### Stream audio and artwork
+
+`PUT /api/v1/files/{relative-library-path}` streams the request body to a temporary file and atomically places it in the library. It supports MP3, M4A, AAC, OGG, WAV, FLAC, JPG, PNG, and WebP without buffering the complete file in memory.
+
+```bash
+BASE='https://your-jukebox.example'
+KEY="$(cat 'UserData/Jukebox API/password.txt')"
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $KEY" \
+  --upload-file '01 Come Together.flac' \
+  "$BASE/api/v1/files/The%20Beatles%20-%20Abbey%20Road/01%20Come%20Together.flac"
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $KEY" \
+  --upload-file cover.jpg \
+  "$BASE/api/v1/files/The%20Beatles%20-%20Abbey%20Road/cover.jpg"
+
+curl --fail-with-body -X POST \
+  -H "Authorization: Bearer $KEY" \
+  "$BASE/api/v1/library/rescan"
+```
+
+Upload an album's artwork beside its tracks, then rescan once after the batch. The `conflict` query parameter accepts `error` (default), `skip`, `replace`, or `rename`. An optional `X-Content-SHA256` header makes Jukebox verify the streamed file before committing it.
+
+### Library and playlist operations
 
 ```text
-.sym-data/
-├── library/       # Uploaded music and album artwork
-├── playlists/     # Saved playlists
-└── assets/        # Generated/runtime artwork
+GET    /api/v1/context
+GET    /api/v1/storage
+GET    /api/v1/tracks
+GET    /api/v1/tracks/{id}
+DELETE /api/v1/tracks/{id}
+GET    /api/v1/albums
+GET    /api/v1/albums/{slug}
+DELETE /api/v1/albums/{slug}
+GET    /api/v1/playlists
+POST   /api/v1/playlists
+GET    /api/v1/playlists/{slug}
+PUT    /api/v1/playlists/{slug}
+DELETE /api/v1/playlists/{slug}
+POST   /api/v1/playlists/{slug}/tracks
+DELETE /api/v1/playlists/{slug}/tracks
+POST   /api/v1/library/rescan
 ```
 
-The app creates these directories automatically. Upload music through the main page (`/` or the backwards-compatible `/manage` route); do not copy files into another profile, `/Users`, `/home/samos`, or a shared top-level library.
+Playlist JSON uses `name` and `track_ids`. Add/remove calls use `{ "track_ids": ["..."] }`.
 
-The manifest declares `.sym-data` as persistent app data so it remains app-scoped across managed restarts and updates.
+## MCP
+
+Authenticated MCP Streamable HTTP JSON-RPC is available at `POST /mcp` and declared in `sym-app.json`. It exposes library, album, playlist, deletion, rescan, and upload-instruction tools. Large binary files deliberately stay on the streaming REST route rather than being base64-encoded into MCP JSON.
 
 ## Independent browser playback
 

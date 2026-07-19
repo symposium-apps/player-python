@@ -15,6 +15,11 @@
     "secrets": []
   },
   "integrations": [],
+  "agent": {
+    "instructions_path": "AGENTS.md",
+    "bootstrap_path": "/api/agent/bootstrap",
+    "mcp_path": "/mcp"
+  },
   "permissions": [],
   "data": {
     "persistent_paths": [".sym-data"],
@@ -23,8 +28,8 @@
       "description": "Music, artwork, and playlists managed by the user or their agent.",
       "label": "Music library",
       "quota_mb": 51200,
-      "content_types": ["audio/*", "image/jpeg", "image/png", "image/webp"],
-      "directories": ["Music", "Playlists", "Artwork"]
+      "content_types": ["audio/*", "image/jpeg", "image/png", "image/webp", "text/plain"],
+      "directories": ["Music", "Playlists", "Artwork", "Jukebox API"]
     },
     "private_state": true,
     "cache": true,
