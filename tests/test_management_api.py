@@ -151,6 +151,7 @@ class ManagementApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         browser_session = json.loads(raw)["session"]
         self.assertNotIn(PASSWORD, browser_session)
+        self.assertEqual(self.request("GET", "/app")[0], 200)
         self.assertEqual(self.request("GET", "/api/library", headers={"X-Jukebox-Session": browser_session})[0], 200)
         status, headers, _ = self.request(
             "POST",
@@ -161,6 +162,20 @@ class ManagementApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("HttpOnly", headers["Set-Cookie"])
         self.assertEqual(self.request("POST", "/auth/session", {"session": "invalid"})[0], 401)
+        self.assertEqual(
+            self.request(
+                "POST",
+                "/api/v1/library/rescan",
+                {},
+                {
+                    "X-Jukebox-Session": browser_session,
+                    "Origin": "https://jukebox.example",
+                    "X-Forwarded-Host": "jukebox.example",
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            )[0],
+            200,
+        )
         self.assertEqual(self.request("POST", "/api/v1/library/rescan", {}, {"Cookie": cookie})[0], 403)
         self.assertEqual(
             self.request(
