@@ -9,3 +9,4 @@ state.json
 wristdeck.log
 node_modules/
 .desktop/
+.sym-data/
