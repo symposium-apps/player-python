@@ -48,7 +48,7 @@ Mobile embedded browsers that block all third-party cookies stream audio and art
 
 Supported browsers receive current-track title, artist, album, artwork, playback state, position, and transport controls through the Media Session API for lock-screen, Control Center, and system media surfaces.
 
-Lock-screen resume calls the already-loaded media element synchronously, without reloading its source or waiting for cache and state bookkeeping. This preserves mobile WebKit's native resume window when an embedded Jukebox page is suspended; subsequent native play/pause events synchronize saved Jukebox state.
+Lock-screen and Dynamic Island play/pause use WebKit's native media-element transport instead of JavaScript action handlers, so iOS can resume audio even while the embedded Jukebox page is suspended. Native play/pause events synchronize saved Jukebox state after WebKit acts.
 
 The browser caches the complete current track and preloads the next queued track in private browser storage. A 500 MB maximum, browser-quota awareness, and least-recently-used eviction bound the cache. Cached audio is generation-bound to the configured password and is cleared when that generation changes; unsupported browsers continue using range streaming.
 

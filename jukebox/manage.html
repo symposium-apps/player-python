@@ -3876,37 +3876,6 @@ function pauseWebAudio() {
   updateMediaSessionMetadata();
 }
 
-function resumeWebAudioFromMediaSession() {
-  const current = state.status?.current_track;
-  if (!current) return;
-  const audio = qs("webAudio");
-  const sameSource = state.webAudioTrackId === String(current.id) && !!audio.currentSrc;
-  if (!sameSource) {
-    playWebAudio(current.id).catch(error => msg(error.message));
-    return;
-  }
-  try {
-    // Keep this call synchronous inside the Media Session callback. Mobile
-    // WebKit may only grant the suspended iframe a narrow native resume window;
-    // awaiting cache/source work before play() can consume that window.
-    const pending = audio.play();
-    state.playback.paused = false;
-    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
-    Promise.resolve(pending).then(() => {
-      saveBrowserPlayback(true);
-      scheduleAudioCaching();
-    }).catch(error => {
-      state.playback.paused = true;
-      updateMediaSessionMetadata();
-      msg(error.message || "Unable to resume audio");
-    });
-  } catch (error) {
-    state.playback.paused = true;
-    updateMediaSessionMetadata();
-    msg(error.message || "Unable to resume audio");
-  }
-}
-
 function mediaSessionArtwork(track) {
   const paths = [track?.album_cover, track?.album_cover_pixel, track?.album_cover_lcd]
     .filter((path, index, items) => path && items.indexOf(path) === index);
@@ -3945,9 +3914,10 @@ function updateMediaSessionPosition() {
 
 function configureMediaSession() {
   if (!("mediaSession" in navigator)) return;
+  for (const action of ["play", "pause"]) {
+    try { navigator.mediaSession.setActionHandler(action, null); } catch (_error) {}
+  }
   const handlers = {
-    play: resumeWebAudioFromMediaSession,
-    pause: pauseWebAudio,
     previoustrack: () => stepPlayback(-1).catch(error => msg(error.message)),
     nexttrack: () => stepPlayback(1).catch(error => msg(error.message)),
     seekbackward: details => {
