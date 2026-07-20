@@ -2861,7 +2861,6 @@
 <body class="jb">
 <div id="appLoader" class="app-loader" role="status" aria-label="Loading Jukebox">
   <svg class="app-loader-logo" viewBox="0 0 512 512" aria-hidden="true">
-    <rect width="512" height="512" rx="120" fill="#101014"/>
     <rect class="app-loader-bar" x="102" y="216" width="44" height="100" rx="22" fill="#fbbf24"/>
     <rect class="app-loader-bar" x="172" y="151" width="44" height="230" rx="22" fill="#fb923c"/>
     <rect class="app-loader-bar" x="242" y="96" width="44" height="340" rx="22" fill="#f43f5e"/>
@@ -3008,6 +3007,7 @@ const state = {
   webAudioObjectUrl: ""
 };
 const appLoaderStartedAt = performance.now();
+let appLoaderHiding = false;
 
 const PLAYBACK_STORAGE_KEY = "jukebox.playback.v1";
 
@@ -3065,13 +3065,15 @@ function qs(id) {
 
 function hideAppLoader() {
   const loader = qs("appLoader");
-  if (!loader) return;
+  if (!loader || appLoaderHiding) return;
+  appLoaderHiding = true;
   const delay = Math.max(0, 620 - (performance.now() - appLoaderStartedAt));
   window.setTimeout(() => {
     loader.classList.add("leaving");
     window.setTimeout(() => loader.remove(), 340);
   }, delay);
 }
+window.setTimeout(hideAppLoader, 1500);
 
 async function api(path, options = {}) {
   const headers = {
@@ -4666,23 +4668,24 @@ async function refresh({ keepMessage = false } = {}) {
   state.streamTicket = String(streamAccess.ticket || "");
   state.streamTicketExpires = Number(streamAccess.expires || 0);
   state.cacheGeneration = String(streamAccess.cache_generation || "");
-  await Promise.all([
-    initializeAudioCache(state.cacheGeneration),
-    initializeArtworkCache(state.cacheGeneration)
-  ]);
   state.status = status;
   state.tracks = library.tracks || [];
   state.playlists = playlists.playlists || [];
-  await primeArtworkCache();
-  await reconcileAudioCache();
   state.playback.queue = state.playback.queue.filter(id => state.tracks.some(track => String(track.id) === String(id)));
   syncStatusFromBrowser();
-  await prepareStoredAudio();
-  scheduleAudioCaching();
   if (state.view.type === "playlist" && !playlistBySlug(state.view.slug)) state.view = { type: "playlists" };
   if (state.view.type === "album" && !albums().find(item => item.name === state.view.name)) state.view = { type: "albums" };
   render();
   if (!keepMessage) msg("Ready");
+  Promise.all([
+    initializeAudioCache(state.cacheGeneration),
+    initializeArtworkCache(state.cacheGeneration)
+  ]).then(async () => {
+    await Promise.all([primeArtworkCache(), reconcileAudioCache()]);
+    await prepareStoredAudio();
+    scheduleAudioCaching();
+    render();
+  }).catch(() => {});
 }
 
 async function refreshStreamAccess() {

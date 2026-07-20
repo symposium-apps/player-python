@@ -376,7 +376,7 @@ class StartupCompatibilityTest(unittest.TestCase):
             "URL.createObjectURL(blob)",
             "artworkCache.urls.get(path)",
             "enforceArtworkCacheLimit(blob.size)",
-            "await primeArtworkCache()",
+            "[primeArtworkCache(), reconcileAudioCache()]",
         ):
             self.assertIn(marker, page)
         self.assertNotIn("`${ARTWORK_CACHE_DB_NAME}:${generation}`", page)
@@ -388,6 +388,10 @@ class StartupCompatibilityTest(unittest.TestCase):
         self.assertEqual(page.count('class="app-loader-bar"'), 5)
         self.assertIn("@keyframes app-loader-level", page)
         self.assertIn("scaleY(.38)", page)
+        self.assertNotIn('<rect width="512" height="512"', page)
+        self.assertIn("window.setTimeout(hideAppLoader, 1500)", page)
+        refresh_source = page[page.index("async function refresh("):page.index("async function refreshStreamAccess")]
+        self.assertNotIn("await primeArtworkCache()", refresh_source)
         self.assertIn("}).finally(hideAppLoader);", page)
 
     def test_browser_player_caches_current_and_next_audio_with_bounded_lru(self) -> None:
