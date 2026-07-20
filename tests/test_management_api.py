@@ -324,6 +324,8 @@ class StartupCompatibilityTest(unittest.TestCase):
         self.assertIn("function recoverSilentIosAudioOutput()", page)
         self.assertIn('document.visibilityState !== "hidden"', page)
         self.assertIn('audio.removeAttribute("src")', page)
+        self.assertIn('audio.addEventListener("loadedmetadata", () => {', page)
+        self.assertIn("audio.currentTime = Math.min(position", page)
         self.assertIn("if (recoverSilentIosAudioOutput()) return", page)
 
     def test_browser_player_caches_current_and_next_audio_with_bounded_lru(self) -> None:

@@ -3918,6 +3918,10 @@ function recoverSilentIosAudioOutput() {
     releaseWebAudioObjectUrl();
     audio.removeAttribute("src");
     audio.load();
+    audio.addEventListener("loadedmetadata", () => {
+      if (!position || !Number.isFinite(audio.duration)) return;
+      audio.currentTime = Math.min(position, Math.max(0, audio.duration - 0.05));
+    }, { once: true });
     audio.src = mediaUrl(current.id);
     audio.load();
     state.webAudioTrackId = String(current.id);
@@ -3928,6 +3932,7 @@ function recoverSilentIosAudioOutput() {
       updateMediaSessionMetadata();
       msg(error.message || "Unable to restore iPhone audio output");
     }).finally(() => { iosAudioOutputRecovery = false; });
+    setTimeout(() => { iosAudioOutputRecovery = false; }, 8000);
   } catch (error) {
     iosAudioOutputRecovery = false;
     state.playback.paused = true;
