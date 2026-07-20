@@ -1,6 +1,6 @@
 [project]
 name = "jukebox"
-version = "1.1.13"
+version = "1.1.14"
 description = "Shared VPS music library with independent browser playback."
 requires-python = ">=3.11"
 dependencies = [
@@ -10,3 +10,6 @@ dependencies = [
 
 [tool.setuptools]
 packages = ["jukebox"]
+
+[tool.setuptools.package-data]
+jukebox = ["*.html", "*.js"]

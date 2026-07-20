@@ -236,6 +236,12 @@ def browser_stream_ticket_is_valid(token: str, password: str) -> bool:
     return hmac.compare_digest(signature, browser_stream_ticket_signature(expires, password))
 
 
+def browser_audio_cache_generation(password: str) -> str:
+    """Return an opaque stable generation that changes with the configured password."""
+    payload = f"jukebox-browser-audio-cache-v1\n{password_fingerprint(password)}".encode("ascii")
+    return hmac.new(browser_session_secret(), payload, hashlib.sha256).hexdigest()
+
+
 def request_is_authenticated(headers: object) -> bool:
     password = configured_password()
     if not password:
@@ -2373,6 +2379,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path == "/jukebox-sw.js":
+                data = (Path(__file__).resolve().parent / "jukebox-sw.js").read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Service-Worker-Allowed", "/")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == "/app":
                 self.send_html(manage_page())
                 return
@@ -2414,8 +2431,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/status":
                 self.send_json(status_payload())
             elif path == "/api/browser-stream-ticket":
-                ticket, expires = create_browser_stream_ticket(configured_password())
-                self.send_json({"ok": True, "ticket": ticket, "expires": expires})
+                password = configured_password()
+                ticket, expires = create_browser_stream_ticket(password)
+                self.send_json({
+                    "ok": True,
+                    "ticket": ticket,
+                    "expires": expires,
+                    "cache_generation": browser_audio_cache_generation(password),
+                })
             elif path == "/api/reset":
                 self.send_json(reset_jukebox_state())
             elif path == "/api/display/reinit":

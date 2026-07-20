@@ -155,8 +155,17 @@ class ManagementApiTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/library", headers={"X-Jukebox-Session": browser_session})[0], 200)
         status, _, raw = self.request("GET", "/api/browser-stream-ticket", headers={"X-Jukebox-Session": browser_session})
         self.assertEqual(status, 200)
-        stream_ticket = json.loads(raw)["ticket"]
+        stream_access = json.loads(raw)
+        stream_ticket = stream_access["ticket"]
         self.assertNotIn(PASSWORD, stream_ticket)
+        self.assertEqual(len(stream_access["cache_generation"]), 64)
+        self.assertNotIn(PASSWORD, stream_access["cache_generation"])
+        sw_status, sw_headers, sw_body = self.request("GET", "/jukebox-sw.js")
+        self.assertEqual(sw_status, 200)
+        self.assertIn("javascript", sw_headers["Content-Type"])
+        self.assertEqual(sw_headers["Service-Worker-Allowed"], "/")
+        self.assertIn(b"X-Jukebox-Audio-Cache", sw_body)
+        self.assertNotIn(PASSWORD.encode("utf-8"), sw_body)
         status, headers, _ = self.request(
             "POST",
             "/auth/session",
@@ -284,12 +293,39 @@ class ManagementApiTest(unittest.TestCase):
 
 
 class StartupCompatibilityTest(unittest.TestCase):
+    def test_audio_cache_generation_is_stable_and_password_scoped(self) -> None:
+        from jukebox import server
+
+        with tempfile.TemporaryDirectory(prefix="jukebox-cache-generation-") as temporary:
+            with mock.patch.object(server, "SESSION_KEY_FILE", Path(temporary) / "browser-session.key"):
+                server.SESSION_SECRET_CACHE = b""
+                first = server.browser_audio_cache_generation("first password")
+                self.assertEqual(first, server.browser_audio_cache_generation("first password"))
+                self.assertNotEqual(first, server.browser_audio_cache_generation("second password"))
+                self.assertNotIn("first password", first)
+
     def test_browser_player_publishes_media_session_metadata_and_controls(self) -> None:
         page = (Path(__file__).resolve().parents[1] / "jukebox" / "manage.html").read_text(encoding="utf-8-sig")
         self.assertIn("new MediaMetadata", page)
         self.assertIn("navigator.mediaSession.setPositionState", page)
+        self.assertIn("AUDIO_CACHE_MAX_BYTES = 500 * 1024 * 1024", page)
+        self.assertIn("scheduleServiceWorkerAudioCache", page)
         for action in ("play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto", "stop"):
             self.assertIn(f"{action}:", page)
+
+    def test_browser_player_caches_current_and_next_audio_with_bounded_lru(self) -> None:
+        page = (Path(__file__).resolve().parents[1] / "jukebox" / "manage.html").read_text(encoding="utf-8-sig")
+        worker = (Path(__file__).resolve().parents[1] / "jukebox" / "jukebox-sw.js").read_text(encoding="utf-8")
+        for marker in (
+            "500 * 1024 * 1024",
+            "scheduleAudioCaching",
+            "scheduleServiceWorkerAudioCache",
+            "cache_generation",
+            'navigator.serviceWorker.register("/jukebox-sw.js"',
+        ):
+            self.assertIn(marker, page)
+        for marker in ("configuredBudget", "lastAccess", "parseRange", "X-Jukebox-Audio-Cache", "cacheTracks", "ticket !== configuredTicket"):
+            self.assertIn(marker, worker)
 
     def test_browser_session_survives_process_state_reset(self) -> None:
         from jukebox import server
@@ -300,6 +336,7 @@ class StartupCompatibilityTest(unittest.TestCase):
                 server.SESSION_SECRET_CACHE = None
                 token = server.create_browser_session(PASSWORD)
                 stream_ticket, _ = server.create_browser_stream_ticket(PASSWORD)
+                cache_generation = server.browser_audio_cache_generation(PASSWORD)
                 self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
                 self.assertTrue(server.session_is_valid(token, PASSWORD))
                 self.assertTrue(server.browser_stream_ticket_is_valid(stream_ticket, PASSWORD))
@@ -308,6 +345,8 @@ class StartupCompatibilityTest(unittest.TestCase):
                 self.assertFalse(server.session_is_valid(token, "changed-password"))
                 self.assertTrue(server.browser_stream_ticket_is_valid(stream_ticket, PASSWORD))
                 self.assertFalse(server.browser_stream_ticket_is_valid(stream_ticket, "changed-password"))
+                self.assertEqual(cache_generation, server.browser_audio_cache_generation(PASSWORD))
+                self.assertNotEqual(cache_generation, server.browser_audio_cache_generation("changed-password"))
 
     def test_browser_login_does_not_wait_for_playback_lock(self) -> None:
         from jukebox import server

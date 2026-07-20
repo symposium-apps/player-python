@@ -1554,6 +1554,17 @@
       justify-content: flex-end;
     }
 
+    .cache-button {
+      height: 30px;
+      max-width: 150px;
+      padding: 0 9px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #b9c0c8;
+      font-size: 11px;
+    }
+
+
     .player-message,
     .player-storage {
       position: absolute;
@@ -2886,6 +2897,7 @@
     </div>
     <div class="player-extra">
       <label class="volume">Vol <input id="volumeSlider" type="range" min="0" max="100" value="70"><span id="volumeValue">70</span></label>
+      <button id="clearCacheBtn" class="cache-button" type="button" title="Clear downloaded audio from this device">Cache unavailable</button>
       <span id="backendText">Loading</span>
     </div>
     <span id="statusText" class="player-message">Ready</span>
@@ -2930,7 +2942,10 @@ const state = {
   playback: loadBrowserPlayback(),
   lastPlaybackSave: 0,
   streamTicket: "",
-  streamTicketExpires: 0
+  streamTicketExpires: 0,
+  cacheGeneration: "",
+  webAudioSource: "",
+  webAudioObjectUrl: ""
 };
 
 const PLAYBACK_STORAGE_KEY = "jukebox.playback.v1";
@@ -2998,6 +3013,7 @@ async function api(path, options = {}) {
     headers
   });
   if (response.status === 401 && browserSession) {
+    await clearAudioCache({ generation: "", preservePlayback: false }).catch(() => {});
     try { localStorage.removeItem(BROWSER_SESSION_STORAGE_KEY); } catch (_) {}
     location.replace("/");
     throw new Error("Your saved session expired.");
@@ -3031,6 +3047,503 @@ function fmtSize(bytes) {
   return `${value.toFixed(precision)} ${units[unit]}`;
 }
 
+const AUDIO_CACHE_DB_NAME = "jukebox-audio-cache-v1";
+const AUDIO_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+const audioCache = {
+  initialized: false,
+  supported: false,
+  generation: "",
+  db: null,
+  entries: new Map(),
+  bytes: 0,
+  limit: AUDIO_CACHE_MAX_BYTES,
+  queue: [],
+  pending: new Map(),
+  worker: null,
+  active: null,
+  desiredNextKey: ""
+};
+const serviceWorkerAudioCache = {
+  supported: false,
+  registration: null,
+  bytes: 0,
+  count: 0,
+  limit: AUDIO_CACHE_MAX_BYTES,
+  trackIds: new Set(),
+  timer: 0
+};
+
+function serviceWorkerAudioCacheTarget() {
+  const registration = serviceWorkerAudioCache.registration;
+  return navigator.serviceWorker?.controller || registration?.active || registration?.waiting || registration?.installing || null;
+}
+
+function postServiceWorkerAudioCache(message) {
+  const target = serviceWorkerAudioCacheTarget();
+  if (target) target.postMessage(message);
+}
+
+navigator.serviceWorker?.addEventListener("message", event => {
+  const message = event.data || {};
+  if (message.type !== "audio-cache-status") return;
+  serviceWorkerAudioCache.bytes = Number(message.bytes || 0);
+  serviceWorkerAudioCache.count = Number(message.count || 0);
+  serviceWorkerAudioCache.limit = Number(message.budget || AUDIO_CACHE_MAX_BYTES);
+  serviceWorkerAudioCache.trackIds = new Set((message.trackIds || []).map(String));
+  renderAudioCacheStatus();
+});
+
+async function initializeServiceWorkerAudioCache(generation) {
+  if (!("serviceWorker" in navigator) || !generation || !state.streamTicket) return false;
+  try {
+    const registration = await navigator.serviceWorker.register("/jukebox-sw.js", { scope: "/" });
+    serviceWorkerAudioCache.registration = registration;
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) {
+      await new Promise(resolve => {
+        const done = () => resolve();
+        navigator.serviceWorker.addEventListener("controllerchange", done, { once: true });
+        setTimeout(done, 2000);
+      });
+    }
+    serviceWorkerAudioCache.supported = !!serviceWorkerAudioCacheTarget();
+    if (!serviceWorkerAudioCache.supported) return false;
+    let budget = AUDIO_CACHE_MAX_BYTES;
+    if (navigator.storage?.estimate) {
+      const estimate = await navigator.storage.estimate();
+      const available = Math.max(0, Number(estimate.quota || 0) - Number(estimate.usage || 0) + serviceWorkerAudioCache.bytes);
+      if (available) budget = Math.min(budget, Math.floor(available * 0.9));
+    }
+    serviceWorkerAudioCache.limit = budget;
+    postServiceWorkerAudioCache({ type: "configure", generation, ticket: state.streamTicket, budget });
+    postServiceWorkerAudioCache({ type: "status" });
+    return true;
+  } catch (_error) {
+    serviceWorkerAudioCache.supported = false;
+    return false;
+  }
+}
+
+function scheduleServiceWorkerAudioCache(delay = 250) {
+  if (!serviceWorkerAudioCache.supported) return;
+  clearTimeout(serviceWorkerAudioCache.timer);
+  serviceWorkerAudioCache.timer = setTimeout(() => {
+    const tracks = trackMap();
+    const current = tracks.get(String(state.playback.currentTrackId || ""));
+    const next = tracks.get(queuedTrackId(1));
+    const selected = [current, next].filter((track, index, items) => track && items.findIndex(item => String(item.id) === String(track.id)) === index);
+    postServiceWorkerAudioCache({
+      type: "configure",
+      generation: state.cacheGeneration,
+      ticket: state.streamTicket,
+      budget: serviceWorkerAudioCache.limit
+    });
+    postServiceWorkerAudioCache({
+      type: "cache-tracks",
+      tracks: selected.map(track => ({
+        id: String(track.id),
+        size: Number(track.size || 0),
+        modified: Number(track.modified || 0),
+        generation: state.cacheGeneration,
+        url: new URL(mediaUrl(track.id), location.href).href
+      }))
+    });
+  }, delay);
+}
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Browser storage failed"));
+  });
+}
+
+function idbTransactionDone(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("Browser storage transaction failed"));
+    transaction.onabort = () => reject(transaction.error || new Error("Browser storage transaction was cancelled"));
+  });
+}
+
+async function openAudioCacheDb() {
+  const request = indexedDB.open(AUDIO_CACHE_DB_NAME, 2);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    if (!db.objectStoreNames.contains("entries")) db.createObjectStore("entries", { keyPath: "key" });
+    if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
+    if (!db.objectStoreNames.contains("audio")) db.createObjectStore("audio", { keyPath: "key" });
+  };
+  return idbRequest(request);
+}
+
+async function cacheDbGet(storeName, key) {
+  const transaction = audioCache.db.transaction(storeName, "readonly");
+  return idbRequest(transaction.objectStore(storeName).get(key));
+}
+
+async function cacheDbGetAll(storeName) {
+  const transaction = audioCache.db.transaction(storeName, "readonly");
+  return idbRequest(transaction.objectStore(storeName).getAll());
+}
+
+async function cacheDbPut(storeName, value) {
+  const transaction = audioCache.db.transaction(storeName, "readwrite");
+  const done = idbTransactionDone(transaction);
+  await idbRequest(transaction.objectStore(storeName).put(value));
+  await done;
+}
+
+async function cacheDbDelete(storeName, key) {
+  const transaction = audioCache.db.transaction(storeName, "readwrite");
+  const done = idbTransactionDone(transaction);
+  await idbRequest(transaction.objectStore(storeName).delete(key));
+  await done;
+}
+
+async function cacheDbClear(storeName) {
+  const transaction = audioCache.db.transaction(storeName, "readwrite");
+  const done = idbTransactionDone(transaction);
+  await idbRequest(transaction.objectStore(storeName).clear());
+  await done;
+}
+
+function trackCacheKey(track) {
+  if (!track) return "";
+  return `${String(track.id)}:${Number(track.size || 0)}:${Number(track.modified || 0)}`;
+}
+
+function currentAndNextCacheKeys() {
+  const tracks = trackMap();
+  const current = tracks.get(String(state.playback.currentTrackId || ""));
+  const next = tracks.get(queuedTrackId(1));
+  return new Set([trackCacheKey(current), trackCacheKey(next), audioCache.active?.key].filter(Boolean));
+}
+
+function renderAudioCacheStatus() {
+  const button = qs("clearCacheBtn");
+  if (!button) return;
+  if (serviceWorkerAudioCache.supported) {
+    button.disabled = false;
+    button.textContent = `Cache ${fmtSize(serviceWorkerAudioCache.bytes)} / ${fmtSize(serviceWorkerAudioCache.limit)}`;
+    button.title = `${serviceWorkerAudioCache.count} cached track${serviceWorkerAudioCache.count === 1 ? "" : "s"} on this device. Click to clear.`;
+    return;
+  }
+  if (!audioCache.supported) {
+    button.textContent = "Cache unavailable";
+    button.disabled = true;
+    return;
+  }
+  button.disabled = false;
+  button.textContent = `Cache ${fmtSize(audioCache.bytes)} / ${fmtSize(audioCache.limit)}`;
+  button.title = `${audioCache.entries.size} cached track${audioCache.entries.size === 1 ? "" : "s"} on this device. Click to clear.`;
+}
+
+async function removeAudioCacheEntry(key) {
+  const entry = audioCache.entries.get(key);
+  if (audioCache.db) {
+    await cacheDbDelete("audio", key);
+    await cacheDbDelete("entries", key);
+  }
+  if (entry) audioCache.bytes = Math.max(0, audioCache.bytes - Number(entry.size || 0));
+  audioCache.entries.delete(key);
+  renderAudioCacheStatus();
+}
+
+async function enforceAudioCacheLimit(requiredBytes = 0) {
+  const protectedKeys = currentAndNextCacheKeys();
+  const candidates = [...audioCache.entries.values()]
+    .filter(entry => !protectedKeys.has(entry.key))
+    .sort((left, right) => Number(left.lastAccess || 0) - Number(right.lastAccess || 0));
+  while (audioCache.bytes + requiredBytes > audioCache.limit && candidates.length) {
+    await removeAudioCacheEntry(candidates.shift().key);
+  }
+  return audioCache.bytes + requiredBytes <= audioCache.limit;
+}
+
+async function clearAudioCache({ generation = audioCache.generation, preservePlayback = true } = {}) {
+  clearTimeout(serviceWorkerAudioCache.timer);
+  if (serviceWorkerAudioCache.supported) {
+    postServiceWorkerAudioCache({ type: "clear" });
+    serviceWorkerAudioCache.bytes = 0;
+    serviceWorkerAudioCache.count = 0;
+    serviceWorkerAudioCache.trackIds.clear();
+  }
+  const audio = qs("webAudio");
+  const cachedTrackId = state.webAudioSource.startsWith("cache:") ? state.webAudioTrackId : "";
+  const resumePosition = cachedTrackId && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+  const resumePlayback = !!cachedTrackId && !audio.paused;
+  audioCache.queue.forEach(item => item.resolve(false));
+  audioCache.queue = [];
+  audioCache.pending.clear();
+  if (audioCache.active?.controller) audioCache.active.controller.abort();
+  if (audioCache.db) {
+    await cacheDbClear("audio");
+    await cacheDbClear("entries");
+    await cacheDbPut("settings", { key: "generation", value: String(generation || "") });
+  }
+  audioCache.entries.clear();
+  audioCache.bytes = 0;
+  audioCache.generation = String(generation || "");
+  renderAudioCacheStatus();
+  if (!preservePlayback && cachedTrackId) {
+    audio.pause();
+    releaseWebAudioObjectUrl();
+    audio.removeAttribute("src");
+    audio.load();
+    state.webAudioTrackId = "";
+    state.webAudioSource = "";
+  } else if (cachedTrackId && trackMap().has(cachedTrackId)) {
+    releaseWebAudioObjectUrl();
+    state.webAudioTrackId = "";
+    state.webAudioSource = "";
+    await ensureWebAudioSource(cachedTrackId);
+    if (resumePosition > 0) {
+      await new Promise(resolve => {
+        const finish = () => resolve();
+        audio.addEventListener("loadedmetadata", finish, { once: true });
+        setTimeout(finish, 1500);
+      });
+      if (Number.isFinite(audio.duration)) audio.currentTime = Math.min(resumePosition, Math.max(0, audio.duration - 0.05));
+    }
+    if (resumePlayback) await audio.play().catch(() => {});
+  }
+}
+
+async function initializeAudioCache(generation) {
+  generation = String(generation || "");
+  if (await initializeServiceWorkerAudioCache(generation)) {
+    audioCache.supported = false;
+    audioCache.initialized = true;
+    renderAudioCacheStatus();
+    return;
+  }
+  if (audioCache.initialized && audioCache.supported && generation === audioCache.generation) {
+    renderAudioCacheStatus();
+    return;
+  }
+  if (!generation || !("indexedDB" in window)) {
+    audioCache.supported = false;
+    audioCache.initialized = true;
+    renderAudioCacheStatus();
+    return;
+  }
+  try {
+    if (!audioCache.db) audioCache.db = await openAudioCacheDb();
+    audioCache.supported = true;
+    const savedGeneration = String((await cacheDbGet("settings", "generation"))?.value || "");
+    audioCache.generation = generation;
+    if (savedGeneration !== generation) {
+      await clearAudioCache({ generation });
+    } else {
+      const entries = await cacheDbGetAll("entries");
+      audioCache.entries = new Map(entries.map(entry => [entry.key, entry]));
+      audioCache.bytes = entries.reduce((total, entry) => total + Number(entry.size || 0), 0);
+    }
+    if (navigator.storage?.estimate) {
+      const estimate = await navigator.storage.estimate();
+      const reusable = Math.max(0, Number(estimate.quota || 0) - Number(estimate.usage || 0) + audioCache.bytes);
+      if (reusable) audioCache.limit = Math.min(AUDIO_CACHE_MAX_BYTES, Math.floor(reusable * 0.9));
+    }
+    audioCache.initialized = true;
+    await enforceAudioCacheLimit();
+  } catch (_error) {
+    audioCache.supported = false;
+    audioCache.initialized = true;
+  }
+  renderAudioCacheStatus();
+}
+
+async function reconcileAudioCache() {
+  if (!audioCache.supported) return;
+  const valid = new Set(state.tracks.map(trackCacheKey));
+  for (const key of [...audioCache.entries.keys()]) {
+    if (!valid.has(key)) await removeAudioCacheEntry(key);
+  }
+  await enforceAudioCacheLimit();
+}
+
+async function touchAudioCacheEntry(key) {
+  const entry = audioCache.entries.get(key);
+  if (!entry) return;
+  entry.lastAccess = Date.now();
+  audioCache.entries.set(key, entry);
+  await cacheDbPut("entries", entry);
+}
+
+async function downloadTrackToAudioCache(track, role, controller) {
+  const key = trackCacheKey(track);
+  const expectedSize = Number(track.size || 0);
+  if (!key || !expectedSize || expectedSize > audioCache.limit) return false;
+  if (audioCache.entries.has(key)) {
+    await touchAudioCacheEntry(key);
+    return true;
+  }
+  if (!await enforceAudioCacheLimit(expectedSize)) return false;
+  const generation = audioCache.generation;
+  const response = await fetch(mediaUrl(track.id), { cache: "no-store", signal: controller.signal });
+  if (!response.ok) throw new Error(`Audio cache download failed (${response.status})`);
+  const data = await response.arrayBuffer();
+  if (controller.signal.aborted || generation !== audioCache.generation) return false;
+  if (data.byteLength !== expectedSize || data.byteLength > audioCache.limit) throw new Error("Incomplete audio cache download");
+  if (!await enforceAudioCacheLimit(data.byteLength)) return false;
+  await cacheDbPut("audio", {
+    key,
+    mime: response.headers.get("Content-Type") || "application/octet-stream",
+    data
+  });
+  const entry = {
+    key,
+    trackId: String(track.id),
+    size: data.byteLength,
+    modified: Number(track.modified || 0),
+    lastAccess: Date.now()
+  };
+  try {
+    await cacheDbPut("entries", entry);
+  } catch (error) {
+    await cacheDbDelete("audio", key);
+    throw error;
+  }
+  audioCache.entries.set(key, entry);
+  audioCache.bytes += data.byteLength;
+  await enforceAudioCacheLimit();
+  renderAudioCacheStatus();
+  return true;
+}
+
+function runAudioCacheWorker() {
+  if (audioCache.worker || !audioCache.supported) return;
+  audioCache.worker = (async () => {
+    while (audioCache.queue.length) {
+      audioCache.queue.sort((left, right) => left.priority - right.priority);
+      const item = audioCache.queue.shift();
+      if (item.role === "next" && item.key !== audioCache.desiredNextKey) {
+        audioCache.pending.delete(item.key);
+        item.resolve(false);
+        continue;
+      }
+      const controller = new AbortController();
+      audioCache.active = { key: item.key, role: item.role, controller };
+      try {
+        item.resolve(await downloadTrackToAudioCache(item.track, item.role, controller));
+      } catch (error) {
+        if (error?.name !== "AbortError") console.warn("Jukebox audio cache:", error);
+        item.resolve(false);
+      } finally {
+        audioCache.pending.delete(item.key);
+        audioCache.active = null;
+      }
+    }
+  })().finally(() => {
+    audioCache.worker = null;
+    if (audioCache.queue.length) runAudioCacheWorker();
+  });
+}
+
+function enqueueAudioCache(track, role) {
+  if (!audioCache.supported || !track) return Promise.resolve(false);
+  const key = trackCacheKey(track);
+  if (!key) return Promise.resolve(false);
+  if (audioCache.entries.has(key)) {
+    touchAudioCacheEntry(key).catch(() => {});
+    return Promise.resolve(true);
+  }
+  if (audioCache.pending.has(key)) return audioCache.pending.get(key);
+  if (role === "current" && audioCache.active?.role === "next" && audioCache.active.key !== key) {
+    audioCache.active.controller.abort();
+  }
+  let resolvePromise;
+  const promise = new Promise(resolve => { resolvePromise = resolve; });
+  audioCache.pending.set(key, promise);
+  audioCache.queue.push({ key, track, role, priority: role === "current" ? 0 : 1, resolve: resolvePromise });
+  runAudioCacheWorker();
+  return promise;
+}
+
+function scheduleAudioCaching() {
+  if (serviceWorkerAudioCache.supported) {
+    scheduleServiceWorkerAudioCache();
+    return;
+  }
+  if (!audioCache.supported) return;
+  const tracks = trackMap();
+  const current = tracks.get(String(state.playback.currentTrackId || ""));
+  const next = tracks.get(queuedTrackId(1));
+  const nextKey = next && (!current || String(next.id) !== String(current.id)) ? trackCacheKey(next) : "";
+  audioCache.desiredNextKey = nextKey;
+  audioCache.queue = audioCache.queue.filter(item => {
+    if (item.role !== "next" || item.key === nextKey) return true;
+    audioCache.pending.delete(item.key);
+    item.resolve(false);
+    return false;
+  });
+  if (audioCache.active?.role === "next" && audioCache.active.key !== nextKey) audioCache.active.controller.abort();
+  if (current) enqueueAudioCache(current, "current");
+  if (nextKey) enqueueAudioCache(next, "next");
+}
+
+async function cachedAudioObjectUrl(track) {
+  if (!audioCache.supported || !track) return "";
+  const key = trackCacheKey(track);
+  const entry = audioCache.entries.get(key);
+  if (!entry) return "";
+  const stored = await cacheDbGet("audio", key);
+  if (!(stored?.data instanceof ArrayBuffer)) {
+    await removeAudioCacheEntry(key);
+    return "";
+  }
+  const blob = new Blob([stored.data], { type: stored.mime || "application/octet-stream" });
+  if (blob.size !== Number(track.size || 0)) {
+    await removeAudioCacheEntry(key);
+    return "";
+  }
+  await touchAudioCacheEntry(key);
+  return URL.createObjectURL(blob);
+}
+
+function releaseWebAudioObjectUrl() {
+  if (state.webAudioObjectUrl) URL.revokeObjectURL(state.webAudioObjectUrl);
+  state.webAudioObjectUrl = "";
+}
+
+async function ensureWebAudioSource(trackId) {
+  const audio = qs("webAudio");
+  const id = String(trackId);
+  const track = trackMap().get(id);
+  if (!track) throw new Error("Track not found");
+  if (state.webAudioTrackId === id && audio.currentSrc) return;
+  const cacheKey = trackCacheKey(track);
+  const localUrl = await cachedAudioObjectUrl(track);
+  if (localUrl) {
+    const previousPosition = state.webAudioTrackId === id && Number.isFinite(audio.currentTime) ? audio.currentTime : Number(state.playback.position || 0);
+    audio.pause();
+    releaseWebAudioObjectUrl();
+    state.webAudioObjectUrl = localUrl;
+    audio.src = localUrl;
+    audio.load();
+    state.webAudioTrackId = id;
+    state.webAudioSource = `cache:${cacheKey}`;
+    if (previousPosition > 0) {
+      await new Promise(resolve => {
+        const finish = () => resolve();
+        audio.addEventListener("loadedmetadata", finish, { once: true });
+        setTimeout(finish, 1500);
+      });
+      if (Number.isFinite(audio.duration)) audio.currentTime = Math.min(previousPosition, Math.max(0, audio.duration - 0.05));
+    }
+    return;
+  }
+  if (state.webAudioTrackId !== id || state.webAudioSource !== "stream" || !audio.currentSrc) {
+    audio.pause();
+    releaseWebAudioObjectUrl();
+    audio.src = mediaUrl(id);
+    audio.load();
+    state.webAudioTrackId = id;
+    state.webAudioSource = "stream";
+  }
+}
+
 function fmtDate(epoch) {
   if (!epoch) return "-";
   return new Date(Number(epoch) * 1000).toLocaleString([], {
@@ -3058,7 +3571,7 @@ function assetUrl(path) {
 function streamUrl(path) {
   if (!path || !state.streamTicket || !/^\/(media|library-art|assets)\//.test(String(path))) return String(path || "");
   const separator = String(path).includes("?") ? "&" : "?";
-  return `${path}${separator}ticket=${encodeURIComponent(state.streamTicket)}`;
+  return `${path}${separator}ticket=${encodeURIComponent(state.streamTicket)}&generation=${encodeURIComponent(state.cacheGeneration)}`;
 }
 
 function mediaUrl(trackId) {
@@ -3323,7 +3836,7 @@ function isPlaybackPaused() {
   return qs("webAudio").paused || !isCurrentWebAudioReady();
 }
 
-function prepareStoredAudio() {
+async function prepareStoredAudio() {
   const audio = qs("webAudio");
   const current = state.status && state.status.current_track;
   audio.volume = Math.max(0, Math.min(1, Number(state.playback.volume || 70) / 100));
@@ -3331,32 +3844,25 @@ function prepareStoredAudio() {
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
+    releaseWebAudioObjectUrl();
     state.webAudioTrackId = "";
+    state.webAudioSource = "";
     return;
   }
-  const id = String(current.id);
-  if (state.webAudioTrackId !== id) {
-    audio.pause();
-    audio.src = mediaUrl(id);
-    audio.load();
-    state.webAudioTrackId = id;
-  }
+  await ensureWebAudioSource(current.id);
 }
 
 async function playWebAudio(trackId) {
   const audio = qs("webAudio");
   const id = String(trackId);
-  audio.pause();
-  if (state.webAudioTrackId !== id) {
-    audio.src = mediaUrl(id);
-    audio.load();
-    state.webAudioTrackId = id;
-  }
+  await ensureWebAudioSource(id);
   audio.volume = Math.max(0, Math.min(1, Number(qs("volumeSlider").value || 70) / 100));
   try {
     await audio.play();
     state.playback.paused = false;
     saveBrowserPlayback(true);
+    updateMediaSessionMetadata();
+    scheduleAudioCaching();
   } catch (error) {
     msg("Browser blocked audio. Click Resume once.");
     throw error;
@@ -3367,6 +3873,7 @@ function pauseWebAudio() {
   qs("webAudio").pause();
   state.playback.paused = true;
   saveBrowserPlayback(true);
+  updateMediaSessionMetadata();
 }
 
 function mediaSessionArtwork(track) {
@@ -3797,16 +4304,32 @@ async function refresh({ keepMessage = false } = {}) {
   ]);
   state.streamTicket = String(streamAccess.ticket || "");
   state.streamTicketExpires = Number(streamAccess.expires || 0);
+  state.cacheGeneration = String(streamAccess.cache_generation || "");
+  await initializeAudioCache(state.cacheGeneration);
   state.status = status;
   state.tracks = library.tracks || [];
   state.playlists = playlists.playlists || [];
+  await reconcileAudioCache();
   state.playback.queue = state.playback.queue.filter(id => state.tracks.some(track => String(track.id) === String(id)));
   syncStatusFromBrowser();
-  prepareStoredAudio();
+  await prepareStoredAudio();
+  scheduleAudioCaching();
   if (state.view.type === "playlist" && !playlistBySlug(state.view.slug)) state.view = { type: "playlists" };
   if (state.view.type === "album" && !albums().find(item => item.name === state.view.name)) state.view = { type: "albums" };
   render();
   if (!keepMessage) msg("Ready");
+}
+
+async function refreshStreamAccess() {
+  const streamAccess = await api("/api/browser-stream-ticket");
+  const generation = String(streamAccess.cache_generation || "");
+  const changed = generation && generation !== state.cacheGeneration;
+  state.streamTicket = String(streamAccess.ticket || "");
+  state.streamTicketExpires = Number(streamAccess.expires || 0);
+  state.cacheGeneration = generation;
+  await initializeAudioCache(generation);
+  if (changed) await reconcileAudioCache();
+  scheduleAudioCaching();
 }
 
 async function savePlaylistTracks(playlist, trackIds) {
@@ -3908,6 +4431,14 @@ async function createPlaylistFromModal() {
 
 qs("backBtn").addEventListener("click", goBack);
 qs("refreshBtn").addEventListener("click", () => refresh());
+qs("clearCacheBtn").addEventListener("click", async () => {
+  if (!serviceWorkerAudioCache.supported && !audioCache.supported) return;
+  const bytes = serviceWorkerAudioCache.supported ? serviceWorkerAudioCache.bytes : audioCache.bytes;
+  if (!confirm(`Clear ${fmtSize(bytes)} of downloaded audio from this device?`)) return;
+  await clearAudioCache();
+  scheduleAudioCaching();
+  msg("Device audio cache cleared");
+});
 qs("lcdBtn").addEventListener("click", () => { window.location.href = "/mini-sym"; });
 document.querySelectorAll("[data-nav]").forEach(button => {
   button.addEventListener("click", () => {
@@ -4149,6 +4680,7 @@ refresh().catch(error => {
   qs("emptyState").hidden = false;
   qs("emptyState").textContent = error.message;
 });
+window.setInterval(() => refreshStreamAccess().catch(() => {}), 5 * 60 * 1000);
 </script>
 </body>
 </html>
