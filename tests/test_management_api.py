@@ -284,6 +284,13 @@ class ManagementApiTest(unittest.TestCase):
 
 
 class StartupCompatibilityTest(unittest.TestCase):
+    def test_browser_player_publishes_media_session_metadata_and_controls(self) -> None:
+        page = (Path(__file__).resolve().parents[1] / "jukebox" / "manage.html").read_text(encoding="utf-8-sig")
+        self.assertIn("new MediaMetadata", page)
+        self.assertIn("navigator.mediaSession.setPositionState", page)
+        for action in ("play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto", "stop"):
+            self.assertIn(f"{action}:", page)
+
     def test_browser_session_survives_process_state_reset(self) -> None:
         from jukebox import server
 
