@@ -3737,6 +3737,13 @@ function revokeArtworkUrls() {
   artworkCache.urls.clear();
 }
 
+function artworkBlobFromEntry(entry) {
+  if (entry?.blob instanceof Blob) return entry.blob;
+  const type = String(entry?.type || "");
+  if (!(entry?.bytes instanceof ArrayBuffer) || !entry.bytes.byteLength || !type.startsWith("image/")) return null;
+  return new Blob([entry.bytes], { type });
+}
+
 async function clearArtworkCache({ generation = artworkCache.generation } = {}) {
   clearTimeout(artworkCache.renderTimer);
   revokeArtworkUrls();
@@ -3775,8 +3782,8 @@ async function initializeArtworkCache(generation) {
     artworkCache.supported = true;
     const entries = await artworkDbGetAll("entries");
     for (const entry of entries) {
-      const blob = entry?.blob;
-      if (!entry?.path || !(blob instanceof Blob) || !blob.size || blob.size > ARTWORK_CACHE_MAX_ITEM_BYTES || !String(blob.type || "").startsWith("image/")) {
+      const blob = artworkBlobFromEntry(entry);
+      if (!entry?.path || !blob || !blob.size || blob.size > ARTWORK_CACHE_MAX_ITEM_BYTES || !String(blob.type || "").startsWith("image/")) {
         if (entry?.path) await artworkDbDelete("entries", entry.path);
         continue;
       }
@@ -3801,14 +3808,14 @@ async function enforceArtworkCacheLimit(requiredBytes = 0) {
   if (!artworkCache.db) return false;
   const entries = (await artworkDbGetAll("entries"))
     .sort((left, right) => Number(left.cachedAt || 0) - Number(right.cachedAt || 0));
-  let bytes = entries.reduce((total, entry) => total + Number(entry.size || entry.blob?.size || 0), 0);
+  let bytes = entries.reduce((total, entry) => total + Number(entry.size || entry.bytes?.byteLength || entry.blob?.size || 0), 0);
   while ((entries.length >= ARTWORK_CACHE_MAX_ENTRIES || bytes + requiredBytes > ARTWORK_CACHE_MAX_BYTES) && entries.length) {
     const stale = entries.shift();
     await artworkDbDelete("entries", stale.path);
     const url = artworkCache.urls.get(stale.path);
     if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
     artworkCache.urls.delete(stale.path);
-    bytes = Math.max(0, bytes - Number(stale.size || stale.blob?.size || 0));
+    bytes = Math.max(0, bytes - Number(stale.size || stale.bytes?.byteLength || stale.blob?.size || 0));
   }
   return bytes + requiredBytes <= ARTWORK_CACHE_MAX_BYTES;
 }
@@ -3821,17 +3828,17 @@ async function cacheArtwork(path, { scheduleRender = true } = {}) {
   const generation = artworkCache.generation;
   const pending = (async () => {
     let entry = await artworkDbGet("entries", path);
-    if (!entry || entry.generation !== generation || !(entry.blob instanceof Blob)) {
+    let blob = artworkBlobFromEntry(entry);
+    if (!entry || entry.generation !== generation || !blob) {
       const fetched = await fetch(assetUrl(path), { credentials: "same-origin", cache: "no-store" });
       if (!fetched.ok) throw new Error(`Artwork request failed (${fetched.status})`);
-      const blob = await fetched.blob();
+      blob = await fetched.blob();
       if (!String(blob.type || "").startsWith("image/")) throw new Error("Artwork response was not an image");
       if (!blob.size || blob.size > ARTWORK_CACHE_MAX_ITEM_BYTES) throw new Error("Artwork is too large to cache");
       if (!await enforceArtworkCacheLimit(blob.size)) throw new Error("Artwork cache is full");
-      entry = { path, generation, blob, size: blob.size, cachedAt: Date.now() };
+      entry = { path, generation, bytes: await blob.arrayBuffer(), type: blob.type, size: blob.size, cachedAt: Date.now() };
       await artworkDbPut("entries", entry);
     }
-    const blob = entry.blob;
     const url = URL.createObjectURL(blob);
     if (artworkCache.generation !== generation) {
       URL.revokeObjectURL(url);

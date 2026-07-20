@@ -371,7 +371,7 @@ class StartupCompatibilityTest(unittest.TestCase):
             'db.createObjectStore("settings", { keyPath: "key" })',
             'artworkDbGet("settings", "generation")',
             'artworkDbPut("entries", entry)',
-            'entry = { path, generation, blob, size: blob.size, cachedAt: Date.now() }',
+            'entry = { path, generation, bytes: await blob.arrayBuffer(), type: blob.type, size: blob.size, cachedAt: Date.now() }',
             'cache: "no-store"',
             "URL.createObjectURL(blob)",
             "artworkCache.urls.get(path)",
