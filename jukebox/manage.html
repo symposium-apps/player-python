@@ -4190,36 +4190,6 @@ function pauseWebAudio() {
   updateMediaSessionMetadata();
 }
 
-function resumeWebAudioFromMediaSession() {
-  const current = state.status?.current_track;
-  if (!current) return;
-  const audio = qs("webAudio");
-  if (state.webAudioTrackId !== String(current.id) || !audio.currentSrc) {
-    releaseWebAudioObjectUrl();
-    audio.src = mediaUrl(current.id);
-    audio.load();
-    state.webAudioTrackId = String(current.id);
-    state.webAudioSource = "stream";
-  }
-  try {
-    const pending = audio.play();
-    state.playback.paused = false;
-    navigator.mediaSession.playbackState = "playing";
-    Promise.resolve(pending).then(() => {
-      saveBrowserPlayback(true);
-      scheduleAudioCaching();
-    }).catch(error => {
-      state.playback.paused = true;
-      updateMediaSessionMetadata();
-      msg(error.message || "Unable to resume audio");
-    });
-  } catch (error) {
-    state.playback.paused = true;
-    updateMediaSessionMetadata();
-    msg(error.message || "Unable to resume audio");
-  }
-}
-
 let iosAudioOutputRecovery = false;
 
 function recoverSilentIosAudioOutput() {
@@ -4280,16 +4250,6 @@ function updateMediaSessionMetadata() {
     mediaSessionMetadataKey = "";
     return;
   }
-  if (IOS_STANDALONE_MEDIA) {
-    // Custom MediaMetadata can make iOS associate Now Playing with a different
-    // installed PWA. Native metadata keeps launch ownership with Jukebox.
-    if (mediaSessionMetadataKey !== "ios-native") {
-      navigator.mediaSession.metadata = null;
-      mediaSessionMetadataKey = "ios-native";
-    }
-    navigator.mediaSession.playbackState = isPlaybackPaused() ? "paused" : "playing";
-    return;
-  }
   const metadata = {
     title: String(track.name || track.title || track.filename || "Unknown Track"),
     artist: artistName(track) || "Jukebox",
@@ -4319,9 +4279,10 @@ function updateMediaSessionPosition() {
 
 function configureMediaSession() {
   if (!("mediaSession" in navigator)) return;
+  for (const action of ["play", "pause"]) {
+    try { navigator.mediaSession.setActionHandler(action, null); } catch (_error) {}
+  }
   const handlers = {
-    play: resumeWebAudioFromMediaSession,
-    pause: pauseWebAudio,
     previoustrack: () => stepPlayback(-1).catch(error => msg(error.message)),
     nexttrack: () => stepPlayback(1).catch(error => msg(error.message)),
     seekbackward: details => {

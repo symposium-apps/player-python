@@ -339,13 +339,11 @@ class StartupCompatibilityTest(unittest.TestCase):
         self.assertIn("navigator.mediaSession.setPositionState", page)
         self.assertIn("AUDIO_CACHE_MAX_BYTES = 500 * 1024 * 1024", page)
         self.assertIn("scheduleServiceWorkerAudioCache", page)
-        for action in ("play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto", "stop"):
+        for action in ("previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto", "stop"):
             self.assertIn(f"{action}:", page)
-        self.assertIn("play: resumeWebAudioFromMediaSession", page)
-        self.assertIn("const pending = audio.play();", page)
-        self.assertIn('mediaSessionMetadataKey !== "ios-native"', page)
-        self.assertIn("navigator.mediaSession.metadata = null", page)
-        self.assertNotIn("setActionHandler(action, null)", page)
+        self.assertIn('for (const action of ["play", "pause"])', page)
+        self.assertIn("setActionHandler(action, null)", page)
+        self.assertNotIn("resumeWebAudioFromMediaSession", page)
         self.assertIn('qs("webAudio").addEventListener("play", () => {', page)
         self.assertIn('qs("webAudio").addEventListener("pause", () => {', page)
         self.assertIn("IOS_STANDALONE_MEDIA", page)
