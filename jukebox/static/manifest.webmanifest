@@ -1,9 +1,9 @@
 {
-  "id": "/",
+  "id": "/jukebox-pwa",
   "name": "Jukebox",
   "short_name": "Jukebox",
   "description": "Your private music library, streamed securely from your Jukebox workspace.",
-  "start_url": "/",
+  "start_url": "/app?source=pwa",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
@@ -38,7 +38,7 @@
       "name": "Open Jukebox",
       "short_name": "Jukebox",
       "description": "Open your private music library",
-      "url": "/",
+      "url": "/app?source=pwa",
       "icons": [
         {
           "src": "/pwa-icon-192.png",
